@@ -193,6 +193,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
   <div class="view" id="view-home"></div>
   <div class="view" id="view-review"></div>
   <div class="view" id="view-activity"></div>
+  <div class="view" id="view-recurring"></div>
   <div class="view" id="view-more"></div>
 </div>
 
@@ -200,6 +201,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
   <button data-tab="home"><span class="ic">🏠</span>Home</button>
   <button data-tab="review"><span class="ic">🧾</span>Review<span class="nbadge" id="review-badge" style="display:none"></span></button>
   <button data-tab="activity"><span class="ic">📋</span>Activity</button>
+  <button data-tab="recurring"><span class="ic">🔁</span>Recurring</button>
   <button data-tab="more"><span class="ic">⚙️</span>More</button>
 </nav>
 
@@ -219,7 +221,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v3.3'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v3.4'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1215,7 +1217,7 @@ function showTab(name){
 }
 function renderCurrent(){
   ({ home: renderHome, review: renderReview, activity: renderActivity,
-     more: renderMore }[CURRENT_TAB])();
+     recurring: renderRecurring, more: renderMore }[CURRENT_TAB])();
   updateReviewBadge();
 }
 function updateReviewBadge(){
@@ -1775,7 +1777,7 @@ function renderHome(){
   c.querySelector('[data-x=next]').onclick = () => { UI.year = years[yi + 1]; renderHome(); };
   const on = (sel, fn) => { const n2 = c.querySelector(sel); if (n2) n2.onclick = fn; };
   on('[data-x=rev]', () => showTab('review'));
-  on('[data-x=recur]', () => openScreen('Recurring', renderRecurringScreen));
+  on('[data-x=recur]', () => showTab('recurring'));
   on('[data-x=import]', () => openScreen('Import', renderImportScreen));
   on('[data-x=bal]', () => openScreen('Accounts', renderAccountsScreen));
   c.querySelectorAll('[data-aidhome]').forEach((n2) => { n2.onclick = () => openAccountEditor(n2.dataset.aidhome, () => renderHome()); });
@@ -2393,7 +2395,6 @@ function renderMore(){
   const items = [
     ['📥', 'Import statements', 'CSV from your bank / card', () => openScreen('Import', renderImportScreen)],
     ['🎯', 'Budgets & Baseline', 'Natural budget + overrides', () => openScreen('Budgets & Baseline', renderBudgetsScreen)],
-    ['🔁', 'Recurring', 'Subscriptions & repeat bills', () => openScreen('Recurring', renderRecurringScreen)],
     ['🏷️', 'Categories & Rules', 'Edit the sorting brain', () => openScreen('Categories & Rules', renderCatsScreen)],
     ['🏦', 'Accounts', 'Banks & cards', () => openScreen('Accounts', renderAccountsScreen)],
     ['🩺', 'Data health', 'Find missing statements & gaps', () => openScreen('Data health', renderHealthScreen)],
@@ -2509,6 +2510,8 @@ function renderBudgetsScreen(c){
 }
 
 /* ---- Recurring screen ---- */
+/* ---- §Recurring (main tab) ---- */
+function renderRecurring(){ renderRecurringScreen($('#view-recurring')); }
 function renderRecurringScreen(c){
   const rec = detectRecurring();
   if (!rec.length){
