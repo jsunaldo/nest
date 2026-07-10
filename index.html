@@ -247,7 +247,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v3.8'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v3.9'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1784,10 +1784,6 @@ function renderHome(){
 
   let html = '<div class="month-nav"><button data-x="prev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button><b>' + esc(UI.year) + '</b>' +
     '<button data-x="next"' + (yi >= years.length - 1 ? ' disabled' : '') + '>›</button></div>';
-
-  html += '<div class="stat-grid" style="margin-bottom:12px">' +
-    '<div class="stat"><div class="v amt-pos">' + fmt$(st.income) + '</div><div class="l">Income ' + esc(UI.year) + '</div></div>' +
-    '<div class="stat"><div class="v">' + fmt$(st.spend) + '</div><div class="l">Spent ' + esc(UI.year) + '</div></div></div>';
 
   // Account balances — each account listed with its current balance (or a prompt
   // to set one). Header shows the net across everything.
