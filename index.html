@@ -1,0 +1,996 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Nest — Household Finances</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0b1210">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<link rel="icon" href="./icon-192.png">
+<link rel="manifest" href="./manifest.json">
+<style>
+/* ============================ DESIGN TOKENS ============================ */
+:root{
+  --bg:#0b1210; --card:#141e19; --card2:#1b2822; --line:rgba(255,255,255,.08);
+  --text:#e9efe9; --dim:#8fa198; --faint:#5d6d65;
+  --accent:#f0c85a; --accent-ink:#211a05;
+  --green:#4cc38a; --red:#ec6f66; --blue:#6ea8dc; --purple:#b18ae0;
+  --radius:16px; --radius-sm:10px;
+  --nav-h:calc(58px + env(safe-area-inset-bottom));
+}
+*{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+html,body{margin:0; padding:0; background:var(--bg); color:var(--text);
+  font:15px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+button,input,select,textarea{font:inherit; color:inherit}
+h1,h2,h3{margin:0; font-weight:700}
+a{color:var(--accent)}
+
+/* ============================ APP SHELL ============================ */
+#app{max-width:680px; margin:0 auto; padding:0 14px var(--nav-h) 14px}
+header.app{position:sticky; top:0; z-index:30; background:linear-gradient(var(--bg) 75%,transparent);
+  padding:calc(10px + env(safe-area-inset-top)) 2px 8px; display:flex; align-items:center; gap:10px}
+header.app .logo{font-size:20px; font-weight:800; letter-spacing:.2px; display:flex; align-items:center; gap:8px}
+header.app .logo .egg{color:var(--accent)}
+header.app .spacer{flex:1}
+.sync-chip{font-size:12px; color:var(--dim); background:var(--card); border:1px solid var(--line);
+  border-radius:999px; padding:4px 10px; display:flex; align-items:center; gap:6px; cursor:pointer}
+.sync-chip .dot{width:8px; height:8px; border-radius:50%; background:var(--faint)}
+.sync-chip.synced .dot{background:var(--green)} .sync-chip.syncing .dot{background:var(--accent); animation:pulse 1s infinite}
+.sync-chip.offline .dot{background:var(--red)} .sync-chip.locked .dot{background:var(--red)}
+@keyframes pulse{50%{opacity:.35}}
+
+nav.tabs{position:fixed; bottom:0; left:0; right:0; z-index:40; background:rgba(13,20,17,.92);
+  backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); border-top:1px solid var(--line);
+  display:flex; padding-bottom:env(safe-area-inset-bottom)}
+nav.tabs button{flex:1; background:none; border:none; color:var(--faint); padding:8px 0 6px;
+  display:flex; flex-direction:column; align-items:center; gap:2px; font-size:10.5px; cursor:pointer; position:relative}
+nav.tabs button .ic{font-size:20px; line-height:1}
+nav.tabs button.active{color:var(--accent)}
+nav.tabs button .nbadge{position:absolute; top:2px; left:calc(50% + 8px); background:var(--red); color:#fff;
+  font-size:10px; font-weight:700; min-width:16px; height:16px; border-radius:8px; padding:0 4px;
+  display:flex; align-items:center; justify-content:center}
+
+.view{display:none; padding-top:4px} .view.active{display:block}
+.screen-head{display:flex; align-items:center; gap:10px; margin:6px 0 12px}
+.screen-head h2{font-size:22px}
+.back-btn{background:var(--card); border:1px solid var(--line); border-radius:999px; width:34px; height:34px;
+  color:var(--text); font-size:16px; cursor:pointer}
+
+/* ============================ PRIMITIVES ============================ */
+.card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:14px 16px; margin-bottom:12px}
+.card h3{font-size:13px; text-transform:uppercase; letter-spacing:.6px; color:var(--dim); margin-bottom:10px; font-weight:700}
+.btn{background:var(--card2); border:1px solid var(--line); color:var(--text); border-radius:12px;
+  padding:10px 16px; font-weight:600; cursor:pointer; font-size:14px}
+.btn:active{transform:scale(.97)}
+.btn-primary{background:var(--accent); border-color:var(--accent); color:var(--accent-ink)}
+.btn-danger{background:transparent; border-color:var(--red); color:var(--red)}
+.btn-sm{padding:6px 12px; font-size:13px; border-radius:10px}
+.btn-block{width:100%; display:block}
+.btn[disabled]{opacity:.45; pointer-events:none}
+.chip{display:inline-flex; align-items:center; gap:5px; background:var(--card2); border:1px solid var(--line);
+  border-radius:999px; padding:5px 12px; font-size:13px; cursor:pointer; color:var(--text)}
+.chip.on{background:var(--accent); color:var(--accent-ink); border-color:var(--accent); font-weight:600}
+.row{display:flex; align-items:center; gap:10px}
+.row .grow{flex:1; min-width:0}
+.muted{color:var(--dim); font-size:13px}
+.tiny{color:var(--faint); font-size:11.5px}
+.amt-neg{color:var(--text)} .amt-pos{color:var(--green)} .amt-big{font-variant-numeric:tabular-nums}
+input[type=text],input[type=number],input[type=date],input[type=month],input[type=password],select,textarea{
+  background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px 12px; width:100%;
+  color:var(--text); outline:none}
+input:focus,select:focus,textarea:focus{border-color:var(--accent)}
+label.fld{display:block; margin-bottom:10px}
+label.fld span{display:block; font-size:12px; color:var(--dim); margin-bottom:4px}
+.seg{display:flex; background:var(--bg); border:1px solid var(--line); border-radius:10px; overflow:hidden}
+.seg button{flex:1; background:none; border:none; padding:8px 4px; color:var(--dim); font-size:13px; cursor:pointer}
+.seg button.on{background:var(--card2); color:var(--text); font-weight:600}
+
+.list-item{display:flex; align-items:center; gap:10px; padding:11px 2px; border-bottom:1px solid var(--line); cursor:pointer}
+.list-item:last-child{border-bottom:none}
+.list-item .ic{width:34px; height:34px; border-radius:10px; background:var(--card2); display:flex;
+  align-items:center; justify-content:center; font-size:16px; flex-shrink:0}
+.list-item .body{flex:1; min-width:0}
+.list-item .body .t1{font-weight:600; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.list-item .body .t2{font-size:12px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.list-item .amt{font-weight:700; font-variant-numeric:tabular-nums; white-space:nowrap}
+
+.progress{height:8px; background:var(--bg); border-radius:4px; overflow:hidden; border:1px solid var(--line)}
+.progress i{display:block; height:100%; background:var(--green); border-radius:4px}
+.progress i.warn{background:var(--accent)} .progress i.over{background:var(--red)}
+
+.stat-grid{display:grid; grid-template-columns:1fr 1fr; gap:10px}
+.stat{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:12px 14px}
+.stat .v{font-size:22px; font-weight:800; font-variant-numeric:tabular-nums}
+.stat .l{font-size:11.5px; color:var(--dim); text-transform:uppercase; letter-spacing:.5px; margin-top:2px}
+
+.badge{background:var(--red); color:#fff; font-size:11px; font-weight:700; border-radius:999px; padding:2px 8px}
+.empty{color:var(--faint); text-align:center; padding:34px 10px; font-size:14px}
+.month-nav{display:flex; align-items:center; gap:6px; justify-content:center; margin-bottom:12px}
+.month-nav b{min-width:110px; text-align:center; font-size:16px}
+.month-nav button{background:var(--card); border:1px solid var(--line); color:var(--text); width:32px; height:32px;
+  border-radius:999px; cursor:pointer}
+
+/* modal + toast */
+#modal-root .overlay{position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:60; display:flex;
+  align-items:flex-end; justify-content:center}
+@media(min-width:600px){#modal-root .overlay{align-items:center}}
+#modal-root .sheet{background:var(--card); border:1px solid var(--line); border-radius:20px 20px 0 0;
+  width:100%; max-width:640px; max-height:86vh; overflow-y:auto; padding:18px 18px calc(18px + env(safe-area-inset-bottom))}
+@media(min-width:600px){#modal-root .sheet{border-radius:20px}}
+#modal-root .sheet h3{font-size:17px; margin-bottom:14px; color:var(--text); text-transform:none; letter-spacing:0}
+#toast-root{position:fixed; bottom:calc(var(--nav-h) + 10px); left:0; right:0; z-index:70;
+  display:flex; flex-direction:column; align-items:center; gap:8px; pointer-events:none}
+.toast{background:var(--card2); border:1px solid var(--line); color:var(--text); border-radius:12px;
+  padding:10px 18px; font-size:14px; box-shadow:0 6px 24px rgba(0,0,0,.45); animation:tin .2s ease-out}
+@keyframes tin{from{opacity:0; transform:translateY(8px)}}
+
+/* category picker grid */
+.cat-grid{display:grid; grid-template-columns:1fr 1fr; gap:8px}
+.cat-grid .cat-btn{background:var(--card2); border:1px solid var(--line); border-radius:12px; padding:10px 12px;
+  text-align:left; cursor:pointer; color:var(--text); font-size:13.5px; font-weight:600; display:flex; align-items:center; gap:8px}
+.cat-grid .cat-btn small{display:block; font-weight:400; color:var(--faint); font-size:11px}
+.cat-grid .cat-btn.on{border-color:var(--accent); background:rgba(240,200,90,.12)}
+.group-label{font-size:11px; color:var(--faint); text-transform:uppercase; letter-spacing:.6px; margin:12px 0 6px}
+
+/* charts */
+.chart-wrap{overflow-x:auto} .chart-wrap svg{display:block}
+.legend{display:flex; flex-wrap:wrap; gap:10px; margin-top:8px; font-size:12px; color:var(--dim)}
+.legend i{display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:5px; vertical-align:-1px}
+
+/* drop zone */
+.drop{border:2px dashed var(--line); border-radius:var(--radius); padding:30px 16px; text-align:center;
+  color:var(--dim); cursor:pointer}
+.drop.over{border-color:var(--accent); color:var(--accent)}
+table.map-tbl{width:100%; border-collapse:collapse; font-size:12px}
+table.map-tbl th,table.map-tbl td{border-bottom:1px solid var(--line); padding:6px 8px; text-align:left;
+  white-space:nowrap; max-width:160px; overflow:hidden; text-overflow:ellipsis}
+table.map-tbl th{color:var(--dim); font-weight:600}
+.tbl-wrap{overflow-x:auto}
+</style>
+</head>
+<body>
+<div id="app">
+  <header class="app">
+    <div class="logo"><span class="egg">🪺</span> Nest</div>
+    <div class="spacer"></div>
+    <div class="sync-chip" id="sync-chip" onclick="openSyncSettings()"><span class="dot"></span><span id="sync-label">local</span></div>
+  </header>
+
+  <div class="view" id="view-home"></div>
+  <div class="view" id="view-review"></div>
+  <div class="view" id="view-activity"></div>
+  <div class="view" id="view-trends"></div>
+  <div class="view" id="view-more"></div>
+</div>
+
+<nav class="tabs" id="tabs">
+  <button data-tab="home"><span class="ic">🏠</span>Home</button>
+  <button data-tab="review"><span class="ic">🧾</span>Review<span class="nbadge" id="review-badge" style="display:none"></span></button>
+  <button data-tab="activity"><span class="ic">📋</span>Activity</button>
+  <button data-tab="trends"><span class="ic">📈</span>Trends</button>
+  <button data-tab="more"><span class="ic">⚙️</span>More</button>
+</nav>
+
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+
+<input type="file" id="file-input" accept=".csv,.txt" multiple style="display:none">
+
+<script>
+'use strict';
+/* =======================================================================
+   NEST — household finance tracker.
+   Engines (store, CSV import, dedupe, rules, analytics, crypto, sync)
+   below are the correctness-critical core. Money is ALWAYS integer cents,
+   signed: negative = money out, positive = money in.
+   ======================================================================= */
+
+/* ============================ CONSTANTS ============================ */
+const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
+const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
+const LSKEY = 'nest.data';
+const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
+const TOMBSTONE_DAYS = 90;
+
+const GROUPS = [
+  { id: 'g-inc',   name: 'Income',      kind: 'income' },
+  { id: 'g-hou',   name: 'Housing' },
+  { id: 'g-house', name: 'House Setup', excludeFromBaseline: true }, // new-house one-time spend
+  { id: 'g-food',  name: 'Food' },
+  { id: 'g-tr',    name: 'Transport' },
+  { id: 'g-shop',  name: 'Shopping' },
+  { id: 'g-heal',  name: 'Health' },
+  { id: 'g-ent',   name: 'Entertainment' },
+  { id: 'g-per',   name: 'Personal' },
+  { id: 'g-tv',    name: 'Travel' },
+  { id: 'g-mo',    name: 'Money' },
+  { id: 'g-sys',   name: 'System', kind: 'system' },
+];
+const SEED_CATS = [
+  ['inc-pay',   'g-inc',  'Paycheck', '💵', 'income'],
+  ['inc-other', 'g-inc',  'Other Income', '💰', 'income'],
+  ['hou-mort',  'g-hou',  'Mortgage / Rent', '🏠'],
+  ['hou-util',  'g-hou',  'Utilities', '💡'],
+  ['hou-net',   'g-hou',  'Internet / Phone', '📶'],
+  ['hou-ins',   'g-hou',  'Home Insurance', '🛡️'],
+  ['hou-maint', 'g-hou',  'Maintenance & Repairs', '🔧'],
+  ['hs-furn',   'g-house','Furniture & Decor', '🛋️'],
+  ['hs-reno',   'g-house','Renovation', '🔨'],
+  ['hs-move',   'g-house','Moving Costs', '📦'],
+  ['food-gro',  'g-food', 'Groceries', '🛒'],
+  ['food-rest', 'g-food', 'Dining Out', '🍽️'],
+  ['food-cof',  'g-food', 'Coffee & Takeout', '☕'],
+  ['tr-gas',    'g-tr',   'Gas', '⛽'],
+  ['tr-car',    'g-tr',   'Car Payment', '🚗'],
+  ['tr-ins',    'g-tr',   'Auto Insurance', '🚦'],
+  ['tr-maint',  'g-tr',   'Car Maintenance', '🔩'],
+  ['tr-park',   'g-tr',   'Parking / Tolls', '🅿️'],
+  ['tr-ride',   'g-tr',   'Rideshare / Transit', '🚕'],
+  ['sh-cloth',  'g-shop', 'Clothing', '👕'],
+  ['sh-house',  'g-shop', 'Household Goods', '🧻'],
+  ['sh-fun',    'g-shop', 'Fun / Impulse', '🎁'],
+  ['sh-gift',   'g-shop', 'Gifts', '🎀'],
+  ['he-med',    'g-heal', 'Medical', '🩺'],
+  ['he-pharm',  'g-heal', 'Pharmacy', '💊'],
+  ['he-fit',    'g-heal', 'Fitness', '🏋️'],
+  ['en-stream', 'g-ent',  'Streaming & Subscriptions', '📺'],
+  ['en-out',    'g-ent',  'Events & Outings', '🎟️'],
+  ['en-hobby',  'g-ent',  'Hobbies', '🎯'],
+  ['pe-care',   'g-per',  'Personal Care', '💈'],
+  ['pet',       'g-per',  'Pets', '🐾'],
+  ['tv',        'g-tv',   'Travel', '✈️'],
+  ['mo-fee',    'g-mo',   'Fees & Interest', '🏦'],
+  ['mo-give',   'g-mo',   'Donations', '❤️'],
+  ['sys-transfer', 'g-sys', 'Transfers & CC Payments', '🔁', 'transfer'],
+  ['sys-misc',  'g-sys',  'Miscellaneous', '❓'],
+];
+// [pattern (contains, uppercase), catId] — editable rule entities seeded once.
+const SEED_RULES = [
+  ['PAYMENT THANK YOU', 'sys-transfer'],
+  ['AUTOMATIC PAYMENT', 'sys-transfer'],
+  ['AUTOPAY', 'sys-transfer'],
+  ['ONLINE TRANSFER', 'sys-transfer'],
+  ['DIRECTPAY', 'sys-transfer'],
+  ['MOBILE PAYMENT - THANK YOU', 'sys-transfer'],
+  ['PAYROLL', 'inc-pay'],
+  ['DIRECT DEP', 'inc-pay'],
+  ['INTEREST CHARGE', 'mo-fee'],
+  ['LATE FEE', 'mo-fee'],
+  ['ANNUAL MEMBERSHIP FEE', 'mo-fee'],
+  ['NETFLIX', 'en-stream'],
+  ['SPOTIFY', 'en-stream'],
+];
+
+/* ============================ UTILS ============================ */
+const $ = (sel) => document.querySelector(sel);
+const nowISO = () => new Date().toISOString();
+const isNewer = (a, b) => String(a || '') > String(b || '');
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+function debounce(fn, ms){ let t; const f = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  f.now = (...a) => { clearTimeout(t); fn(...a); }; return f; }
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g,
+  (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function median(arr){ if (!arr.length) return 0; const a = arr.slice().sort((x, y) => x - y);
+  const m = a.length >> 1; return a.length % 2 ? a[m] : Math.round((a[m - 1] + a[m]) / 2); }
+function daysBetween(d1, d2){ return Math.round((Date.parse(d2) - Date.parse(d1)) / 864e5); }
+const hex = (bytes) => Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+function b64FromBytes(bytes){ let s = ''; for (let i = 0; i < bytes.length; i += 0x8000)
+  s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(s); }
+function bytesFromB64(b64){ const s = atob(b64); const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i); return out; }
+
+/* ============================ MONEY & DATES ============================ */
+function fmt$(cents, opts){
+  opts = opts || {};
+  const neg = cents < 0, a = Math.abs(Math.round(cents || 0));
+  const s = '$' + Math.floor(a / 100).toLocaleString('en-US') + '.' + String(a % 100).padStart(2, '0');
+  if (opts.signed) return (neg ? '-' : '+') + s;
+  return (neg ? '-' : '') + s;
+}
+// "1,234.56" | "$-45.00" | "(45.00)" | "45.5" -> signed integer cents (null if unparseable)
+function parseAmountCents(s){
+  if (s == null) return null;
+  s = String(s).trim();
+  if (!s || s === '-' || s === '--') return null;
+  let neg = false;
+  if (/^\(.*\)$/.test(s)){ neg = true; s = s.slice(1, -1); }
+  s = s.replace(/[$,\s]/g, '');
+  if (s.startsWith('-')){ neg = true; s = s.slice(1); }
+  if (s.startsWith('+')) s = s.slice(1);
+  if (!/^\d+(\.\d*)?$/.test(s) && !/^\.\d+$/.test(s)) return null;
+  const parts = s.split('.');
+  const cents = (parseInt(parts[0] || '0', 10) * 100) + parseInt(((parts[1] || '') + '00').slice(0, 2), 10);
+  return neg ? -cents : cents;
+}
+function isoDate(y, mo, d){
+  mo = +mo; d = +d; y = +y;
+  if (!y || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  return y + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+}
+// "2026-07-03", "7/3/2026", "07-03-26", "7/3/26 12:00" -> "2026-07-03" (null if unparseable)
+function parseDateISO(s){
+  if (!s) return null;
+  s = String(s).trim();
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return isoDate(m[1], m[2], m[3]);
+  m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if (m) return isoDate(m[3].length === 2 ? '20' + m[3] : m[3], m[1], m[2]);
+  return null;
+}
+const ymOf = (isoD) => (isoD || '').slice(0, 7);
+function currentYM(){ const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); }
+function shiftYM(ym, delta){ const [y, m] = ym.split('-').map(Number);
+  const d = new Date(y, m - 1 + delta, 1); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); }
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function fmtMonth(ym){ if (!ym) return ''; const [y, m] = ym.split('-'); return MONTHS[+m - 1] + ' ' + y; }
+function fmtDate(isoD){ if (!isoD) return ''; const [y, m, d] = isoD.split('-'); return MONTHS[+m - 1] + ' ' + (+d); }
+function ymRange(fromYM, toYM){ const out = []; let cur = fromYM;
+  let guard = 0; while (cur <= toYM && guard++ < 240){ out.push(cur); cur = shiftYM(cur, 1); } return out; }
+
+/* ============================ STATE & STORE ============================ */
+let DATA = null;
+const UI = { month: currentYM() };
+
+function loadData(){
+  try { DATA = JSON.parse(localStorage.getItem(LSKEY)); } catch (e) { DATA = null; }
+  if (!DATA || typeof DATA !== 'object') DATA = {};
+  for (const m of SYNC_MAPS) DATA[m] = DATA[m] || {};
+  seedIfEmpty();
+  purgeTombstones();
+}
+const saveData = debounce(() => { try { localStorage.setItem(LSKEY, JSON.stringify(DATA)); } catch (e) {} }, 250);
+const saveNow = () => saveData.now();
+
+// All mutations flow through put()/softDelete() so updatedAt + sync stay honest.
+function put(mapName, ent){
+  ent.updatedAt = nowISO();
+  DATA[mapName][ent.id] = ent;
+  saveData(); markDirty();
+  return ent;
+}
+function softDelete(mapName, id){
+  const ent = DATA[mapName][id];
+  if (!ent) return;
+  ent.deleted = true;
+  put(mapName, ent);
+}
+function seedIfEmpty(){
+  if (!Object.keys(DATA.cats).length){
+    for (const [id, group, name, icon, kind] of SEED_CATS)
+      DATA.cats[id] = { id, group, name, icon, kind: kind || 'expense', updatedAt: SEED_TS };
+  }
+  if (!Object.keys(DATA.rules).length){
+    SEED_RULES.forEach(([pattern, cat], i) => {
+      const id = 'seed-r' + i;
+      DATA.rules[id] = { id, type: 'contains', pattern, cat, updatedAt: SEED_TS };
+    });
+  }
+  saveData();
+}
+function purgeTombstones(){
+  const cutoff = new Date(Date.now() - TOMBSTONE_DAYS * 864e5).toISOString();
+  for (const m of SYNC_MAPS)
+    for (const id in DATA[m])
+      if (DATA[m][id].deleted && DATA[m][id].updatedAt < cutoff) delete DATA[m][id];
+}
+function settings(){
+  return DATA.kv.settings || { id: 'settings', baselineFrom: '', baselineTo: '' };
+}
+function saveSettings(patch){ put('kv', Object.assign({}, settings(), patch, { id: 'settings' })); }
+function countEntities(data){
+  let n = 0;
+  for (const m of SYNC_MAPS) if (data[m]) n += Object.keys(data[m]).length;
+  return n;
+}
+
+/* ============================ CSV ENGINE ============================ */
+// RFC-4180: quoted fields, escaped quotes, commas/newlines inside quotes, BOM.
+function parseCSV(text){
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const rows = []; let row = [], field = '', inQ = false;
+  for (let i = 0; i < text.length; i++){
+    const c = text[i];
+    if (inQ){
+      if (c === '"'){ if (text[i + 1] === '"'){ field += '"'; i++; } else inQ = false; }
+      else field += c;
+    }
+    else if (c === '"') inQ = true;
+    else if (c === ','){ row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r'){
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); field = '';
+      if (row.length > 1 || row[0].trim() !== '') rows.push(row);
+      row = [];
+    }
+    else field += c;
+  }
+  row.push(field);
+  if (row.length > 1 || row[0].trim() !== '') rows.push(row);
+  return rows;
+}
+
+const MERCHANT_PREFIX_STRIPS = ['TST* ', 'TST *', 'SQ *', 'SQ*', 'PY *', 'PAYPAL *', 'PP* ', 'DD *', 'APLPAY ', 'APPLE PAY '];
+function normMerchant(raw){
+  let s = String(raw || '').toUpperCase().replace(/["']/g, ' ');
+  for (const p of MERCHANT_PREFIX_STRIPS) if (s.startsWith(p)) s = s.slice(p.length);
+  s = s.replace(/\bX{4,}\d*\b/g, ' ')   // masked card fragments
+       .replace(/#\s?\d+/g, ' ')        // store numbers
+       .replace(/\b\d{5,}\b/g, ' ')     // long reference numbers
+       .replace(/\s+/g, ' ').trim();
+  return s.slice(0, 48) || 'UNKNOWN';
+}
+
+// Bank CSV presets. map values are lowercased HEADER NAMES (not positions).
+// flip: bank reports purchases as positive -> multiply by -1.
+// debit/credit: two-column files; amount = credit - debit.
+const BANK_PRESETS = [
+  { id: 'chase-card', label: 'Chase Credit Card', sig: ['transaction date', 'description', 'amount', 'type'],
+    map: { date: 'transaction date', desc: 'description', amount: 'amount' } },
+  { id: 'chase-bank', label: 'Chase Checking', sig: ['details', 'posting date', 'description', 'amount'],
+    map: { date: 'posting date', desc: 'description', amount: 'amount' } },
+  { id: 'cap1', label: 'Capital One Card', sig: ['transaction date', 'description', 'debit', 'credit'],
+    map: { date: 'transaction date', desc: 'description', debit: 'debit', credit: 'credit' } },
+  { id: 'citi', label: 'Citi Card', sig: ['date', 'description', 'debit', 'credit'],
+    map: { date: 'date', desc: 'description', debit: 'debit', credit: 'credit' } },
+  { id: 'discover', label: 'Discover Card', sig: ['trans. date', 'description', 'amount'],
+    map: { date: 'trans. date', desc: 'description', amount: 'amount', flip: true } },
+  { id: 'boa-bank', label: 'Bank of America Checking', sig: ['date', 'description', 'amount', 'running bal.'],
+    map: { date: 'date', desc: 'description', amount: 'amount' } },
+  { id: 'boa-card', label: 'Bank of America Card', sig: ['posted date', 'payee', 'amount'],
+    map: { date: 'posted date', desc: 'payee', amount: 'amount' } },
+  { id: 'apple', label: 'Apple Card', sig: ['transaction date', 'merchant', 'amount (usd)'],
+    map: { date: 'transaction date', desc: 'merchant', amount: 'amount (usd)', flip: true } },
+  { id: 'amex', label: 'Amex', sig: ['date', 'description', 'amount'],
+    map: { date: 'date', desc: 'description', amount: 'amount', flip: true } },
+];
+
+// First row is a header if none of its cells parse as a date or amount.
+function looksLikeHeader(row){
+  return !row.some((cell) => parseDateISO(cell) !== null) &&
+         !row.some((cell) => /\d/.test(cell) && parseAmountCents(cell) !== null && cell.trim() !== '');
+}
+function detectPreset(headers){
+  const h = headers.map((x) => x.trim().toLowerCase());
+  let best = null, bestLen = 0;
+  for (const p of BANK_PRESETS){
+    if (p.sig.every((col) => h.includes(col)) && p.sig.length > bestLen){ best = p; bestLen = p.sig.length; }
+  }
+  return best;
+}
+// Inspect raw CSV text -> everything the import UI needs to show a preview.
+function analyzeCSV(text, filename){
+  const rows = parseCSV(text);
+  if (!rows.length) return { error: 'Empty file', filename };
+  const hasHeader = looksLikeHeader(rows[0]);
+  const headers = hasHeader ? rows[0].map((x) => x.trim()) : rows[0].map((_, i) => 'Column ' + (i + 1));
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  const preset = hasHeader ? detectPreset(headers) : null;
+  return { filename, headers, dataRows, hasHeader, preset, mapping: preset ? presetToMapping(preset, headers) : guessMapping(headers) };
+}
+// mapping: {dateIdx, descIdx, amountIdx | debitIdx+creditIdx, flip} (column indexes)
+function presetToMapping(preset, headers){
+  const h = headers.map((x) => x.trim().toLowerCase());
+  const idx = (name) => h.indexOf(name);
+  const m = { flip: !!preset.map.flip, presetId: preset.id };
+  m.dateIdx = idx(preset.map.date);
+  m.descIdx = idx(preset.map.desc);
+  if (preset.map.amount != null){ m.amountIdx = idx(preset.map.amount); }
+  else { m.debitIdx = idx(preset.map.debit); m.creditIdx = idx(preset.map.credit); }
+  return m;
+}
+function guessMapping(headers){
+  const h = headers.map((x) => x.trim().toLowerCase());
+  const find = (...names) => { for (const n of names){ const i = h.findIndex((x) => x.includes(n)); if (i >= 0) return i; } return -1; };
+  const m = { flip: false };
+  m.dateIdx = find('date');
+  m.descIdx = find('description', 'payee', 'merchant', 'name', 'memo');
+  const debit = find('debit'), credit = find('credit');
+  if (debit >= 0 && credit >= 0){ m.debitIdx = debit; m.creditIdx = credit; }
+  else m.amountIdx = find('amount');
+  return m;
+}
+// Apply a column mapping -> [{date, desc, amt}] + skip count.
+function applyMapping(dataRows, mapping){
+  const parsed = [], errors = [];
+  for (const row of dataRows){
+    const date = parseDateISO(row[mapping.dateIdx]);
+    const desc = (row[mapping.descIdx] || '').trim();
+    let amt = null;
+    if (mapping.amountIdx != null && mapping.amountIdx >= 0){
+      amt = parseAmountCents(row[mapping.amountIdx]);
+      if (amt != null && mapping.flip) amt = -amt;
+    } else if (mapping.debitIdx != null){
+      const d = parseAmountCents(row[mapping.debitIdx]);
+      const c = parseAmountCents(row[mapping.creditIdx]);
+      if (d != null || c != null) amt = Math.abs(c || 0) - Math.abs(d || 0);
+    }
+    if (!date || amt == null || !desc){ errors.push(row); continue; }
+    parsed.push({ date, desc, amt });
+  }
+  return { parsed, skipped: errors.length };
+}
+
+/* ============================ IMPORT PIPELINE ============================ */
+// Dedupe fingerprint: acct|date|amt|merchant, plus '|#n' occurrence suffix so two
+// legit identical same-day charges coexist while re-imports stay idempotent.
+// Counts include tombstoned txns on purpose: deleting a txn then re-importing
+// the same statement must NOT resurrect it.
+function importParsed(acctId, parsed, sourceLabel){
+  const batchId = uid();
+  const fpCount = {};
+  for (const id in DATA.txns){
+    const t = DATA.txns[id];
+    if (t.acct !== acctId) continue;
+    fpCount[t.fp.split('|#')[0]] = (fpCount[t.fp.split('|#')[0]] || 0) + 1;
+  }
+  const groups = {};
+  for (const p of parsed){
+    const m = normMerchant(p.desc);
+    const base = acctId + '|' + p.date + '|' + p.amt + '|' + m;
+    (groups[base] = groups[base] || []).push(Object.assign({ m }, p));
+  }
+  let added = 0, dupes = 0, review = 0, minD = null, maxD = null;
+  for (const base in groups){
+    const rows = groups[base];
+    const existing = fpCount[base] || 0;
+    dupes += Math.min(existing, rows.length);
+    for (let i = existing; i < rows.length; i++){
+      const p = rows[i];
+      const rule = matchRule(p.m);
+      const t = {
+        id: uid(), acct: acctId, date: p.date, amt: p.amt,
+        mraw: p.desc, m: p.m,
+        cat: rule ? rule.cat : null,
+        splits: null, note: '', tags: [],
+        status: rule ? 'ok' : 'review',
+        fp: base + '|#' + i, batch: batchId, src: sourceLabel || '',
+      };
+      if (!rule) review++;
+      put('txns', t);
+      if (!minD || t.date < minD) minD = t.date;
+      if (!maxD || t.date > maxD) maxD = t.date;
+    }
+    added += Math.max(0, rows.length - existing);
+  }
+  return { batchId, added, dupes, review, from: minD, to: maxD };
+}
+
+/* ============================ RULES ENGINE ============================ */
+function liveRules(){ return Object.values(DATA.rules).filter((r) => !r.deleted); }
+// Exact match wins over contains; longer contains-patterns win over shorter.
+function matchRule(m){
+  let best = null;
+  for (const r of liveRules()){
+    if (!DATA.cats[r.cat] || DATA.cats[r.cat].deleted) continue;
+    if (r.type === 'exact'){ if (r.pattern === m) return r; }
+    else if (m.includes(r.pattern)){ if (!best || r.pattern.length > best.pattern.length) best = r; }
+  }
+  return best;
+}
+function createRule(pattern, cat, type){
+  pattern = String(pattern || '').toUpperCase().trim();
+  if (!pattern || !DATA.cats[cat]) return null;
+  const existing = liveRules().find((r) => r.pattern === pattern && r.type === (type || 'contains'));
+  if (existing){ existing.cat = cat; return put('rules', existing); }
+  return put('rules', { id: uid(), type: type || 'contains', pattern, cat });
+}
+// Re-run rules over the review queue (after new rules land). Returns # resolved.
+function reapplyRules(){
+  let n = 0;
+  for (const id in DATA.txns){
+    const t = DATA.txns[id];
+    if (t.deleted || t.status !== 'review') continue;
+    const r = matchRule(t.m);
+    if (r){ t.cat = r.cat; t.status = 'ok'; put('txns', t); n++; }
+  }
+  return n;
+}
+function reviewTxns(){
+  return liveTxns().filter((t) => t.status === 'review').sort((a, b) => (a.date < b.date ? 1 : -1));
+}
+
+/* ============================ ANALYTICS ============================ */
+function liveTxns(){ return Object.values(DATA.txns).filter((t) => !t.deleted); }
+function liveCats(){ return Object.values(DATA.cats).filter((c) => !c.deleted); }
+function catKind(catId){ const c = DATA.cats[catId]; return c ? (c.kind || 'expense') : 'expense'; }
+function groupOf(catId){ const c = DATA.cats[catId]; return GROUPS.find((g) => g.id === (c && c.group)) || null; }
+// A txn counts as its splits when present; otherwise as a single part.
+// Uncategorized (review) money is real spend -> pseudo-cat '__uncat'.
+function effParts(t){
+  if (t.splits && t.splits.length) return t.splits;
+  return [{ cat: t.cat || '__uncat', amt: t.amt }];
+}
+// {ym: {spend: {catId: cents}, spendTotal, incomeTotal}} across all live, non-excluded txns.
+function buildMonthAgg(){
+  const out = {};
+  for (const t of liveTxns()){
+    if (t.status === 'excluded') continue;
+    const ym = ymOf(t.date);
+    const bucket = out[ym] || (out[ym] = { spend: {}, spendTotal: 0, incomeTotal: 0 });
+    for (const part of effParts(t)){
+      const kind = part.cat === '__uncat' ? 'expense' : catKind(part.cat);
+      if (kind === 'transfer') continue;
+      if (kind === 'income'){ bucket.incomeTotal += part.amt; continue; }
+      bucket.spend[part.cat] = (bucket.spend[part.cat] || 0) - part.amt;
+      bucket.spendTotal -= part.amt;
+    }
+  }
+  return out;
+}
+// Median monthly spend per category over the baseline window ("natural budget").
+// Only window months that contain any data count; House Setup group is excluded.
+function baselineByCat(agg){
+  const s = settings();
+  if (!s.baselineFrom || !s.baselineTo) return null;
+  agg = agg || buildMonthAgg();
+  const months = ymRange(s.baselineFrom, s.baselineTo).filter((ym) => agg[ym]);
+  if (!months.length) return null;
+  const out = { months: months.length, cats: {}, total: 0 };
+  for (const c of liveCats()){
+    if ((c.kind || 'expense') !== 'expense') continue;
+    const g = GROUPS.find((x) => x.id === c.group);
+    if (g && g.excludeFromBaseline) continue;
+    const vals = months.map((ym) => (agg[ym].spend[c.id] || 0));
+    const med = median(vals);
+    if (med > 0){ out.cats[c.id] = med; out.total += med; }
+  }
+  return out;
+}
+// Explicit budget wins; else baseline; else null.
+function budgetFor(catId, baseline){
+  const b = DATA.budgets[catId];
+  if (b && !b.deleted && b.amt > 0) return { amt: b.amt, source: 'set' };
+  if (baseline && baseline.cats[catId]) return { amt: baseline.cats[catId], source: 'baseline' };
+  return null;
+}
+// Subscriptions / recurring charges, detected from merchant cadence + amount stability.
+function detectRecurring(){
+  const byM = {};
+  for (const t of liveTxns()){
+    if (t.status === 'excluded' || t.amt >= 0) continue;
+    if (t.cat && catKind(t.cat) === 'transfer') continue;
+    (byM[t.m] = byM[t.m] || []).push(t);
+  }
+  const out = [];
+  for (const m in byM){
+    const ts = byM[m].sort((a, b) => (a.date < b.date ? -1 : 1));
+    if (ts.length < 3) continue;
+    const gaps = [];
+    for (let i = 1; i < ts.length; i++) gaps.push(daysBetween(ts[i - 1].date, ts[i].date));
+    const gap = median(gaps);
+    let period = null;
+    if (gap >= 25 && gap <= 35) period = 'monthly';
+    else if (gap >= 6 && gap <= 8) period = 'weekly';
+    else if (gap >= 85 && gap <= 100) period = 'quarterly';
+    else if (gap >= 350 && gap <= 380) period = 'yearly';
+    if (!period) continue;
+    const amts = ts.map((t) => -t.amt);
+    const medAmt = median(amts);
+    if (!amts.every((a) => Math.abs(a - medAmt) <= Math.max(200, medAmt * 0.15))) continue;
+    const monthly = period === 'monthly' ? medAmt
+      : period === 'weekly' ? Math.round(medAmt * 52 / 12)
+      : period === 'quarterly' ? Math.round(medAmt / 3)
+      : Math.round(medAmt / 12);
+    out.push({ merchant: m, period, amt: medAmt, monthly, count: ts.length,
+               last: ts[ts.length - 1].date, cat: ts[ts.length - 1].cat });
+  }
+  return out.sort((a, b) => b.monthly - a.monthly);
+}
+// Category suggestions for the review queue: same-merchant history first, then most-used.
+function suggestCats(m){
+  const seen = {}, order = [];
+  for (const t of liveTxns()){
+    if (t.m === m && t.cat && t.status === 'ok'){ seen[t.cat] = (seen[t.cat] || 0) + 100; }
+  }
+  for (const t of liveTxns()){
+    if (t.cat && t.status === 'ok') seen[t.cat] = (seen[t.cat] || 0) + 1;
+  }
+  for (const id of Object.keys(seen).sort((a, b) => seen[b] - seen[a])){
+    if (DATA.cats[id] && !DATA.cats[id].deleted) order.push(id);
+  }
+  return order;
+}
+// Digest of un-ruled review merchants — paste to Claude, get rules JSON back.
+function exportReviewDigest(){
+  const byM = {};
+  for (const t of reviewTxns()){
+    const b = byM[t.m] || (byM[t.m] = { merchant: t.m, count: 0, total: 0, example: t.mraw });
+    b.count++; b.total += -t.amt;
+  }
+  const list = Object.values(byM).sort((a, b) => b.total - a.total)
+    .map((x) => ({ merchant: x.merchant, count: x.count, total: fmt$(x.total), example: x.example }));
+  const catList = liveCats().map((c) => c.id + ' = ' + c.name).join('\n');
+  return 'NEST REVIEW DIGEST — for each merchant below, reply with rules JSON: ' +
+    '[{"pattern":"MERCHANT TEXT","cat":"cat-id"}] using these category ids:\n' +
+    catList + '\n\nMERCHANTS:\n' + JSON.stringify(list, null, 1);
+}
+function importRulesJSON(text){
+  let arr;
+  try { arr = JSON.parse(text); } catch (e) { return { error: 'Not valid JSON' }; }
+  if (!Array.isArray(arr)) return { error: 'Expected a JSON array' };
+  let created = 0, bad = 0;
+  for (const r of arr){
+    if (r && r.pattern && r.cat && DATA.cats[r.cat] && !DATA.cats[r.cat].deleted){
+      createRule(r.pattern, r.cat, r.type === 'exact' ? 'exact' : 'contains'); created++;
+    } else bad++;
+  }
+  const resolved = reapplyRules();
+  return { created, bad, resolved };
+}
+
+/* ============================ CRYPTO (E2E) ============================ */
+// passphrase -> PBKDF2 -> [authToken (sent to worker) | AES-256-GCM key (never sent)].
+// roomId derives from authToken. The worker only ever sees ciphertext + counts.
+const KDF_ITER = 310000;
+let CRYPTO = null;
+async function deriveKeys(pass){
+  const te = new TextEncoder();
+  const km = await crypto.subtle.importKey('raw', te.encode(pass), 'PBKDF2', false, ['deriveBits']);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: te.encode('nest-ledger-v1|salt'), iterations: KDF_ITER, hash: 'SHA-256' }, km, 512));
+  const authToken = hex(bits.slice(0, 32));
+  const aesKey = await crypto.subtle.importKey('raw', bits.slice(32, 64), 'AES-GCM', false, ['encrypt', 'decrypt']);
+  const roomBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode('nest-room|' + authToken)));
+  return { authToken, aesKey, roomId: hex(roomBytes).slice(0, 24) };
+}
+async function maybeGzip(bytes){
+  if (typeof CompressionStream === 'undefined') return { bytes, gz: false };
+  const out = await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
+  return { bytes: new Uint8Array(out), gz: true };
+}
+async function gunzip(bytes){
+  const out = await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+  return new Uint8Array(out);
+}
+async function encryptState(){
+  const plain = new TextEncoder().encode(JSON.stringify(DATA));
+  const { bytes, gz } = await maybeGzip(plain);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, CRYPTO.aesKey, bytes));
+  return { v: 1, gz, iv: b64FromBytes(iv), ct: b64FromBytes(ct), entities: countEntities(DATA), updatedAt: nowISO() };
+}
+async function decryptEnvelope(env){
+  const pt = new Uint8Array(await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: bytesFromB64(env.iv) }, CRYPTO.aesKey, bytesFromB64(env.ct)));
+  const bytes = env.gz ? await gunzip(pt) : pt;
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+/* ============================ SYNC CLIENT ============================ */
+// Single encrypted blob + compare-and-swap version. Client pulls, merges
+// entity-by-entity (last-write-wins on updatedAt, tombstones included), then
+// pushes; a 409 means someone else pushed first -> re-pull, re-merge, retry once.
+const SYNC = { status: 'local', dirty: false, inflight: false,
+               serverVer: +(localStorage.getItem('nest.ver') || 0) };
+function setSync(status){
+  SYNC.status = status;
+  const chip = $('#sync-chip');
+  chip.className = 'sync-chip ' + status;
+  $('#sync-label').textContent = status;
+}
+function markDirty(){
+  if (!CRYPTO) return;
+  SYNC.dirty = true;
+  schedulePush();
+}
+function mergeRemote(remote){
+  let changed = false, localAhead = false;
+  for (const mapName of SYNC_MAPS){
+    const l = DATA[mapName] || (DATA[mapName] = {});
+    const r = (remote && remote[mapName]) || {};
+    for (const id in r){
+      if (!l[id] || isNewer(r[id].updatedAt, l[id].updatedAt)){ l[id] = r[id]; changed = true; }
+      else if (isNewer(l[id].updatedAt, r[id].updatedAt)) localAhead = true;
+    }
+    for (const id in l) if (!(id in r)) localAhead = true;
+  }
+  if (localAhead) SYNC.dirty = true;
+  return changed;
+}
+async function syncPull(quiet){
+  if (!CRYPTO) return false;
+  if (!quiet) setSync('syncing');
+  try {
+    const res = await fetch(SYNC_URL + '/state/' + CRYPTO.roomId, { headers: { 'X-Nest-Auth': CRYPTO.authToken } });
+    if (res.status === 401){ setSync('locked'); return false; }
+    if (!res.ok) throw 0;
+    const body = await res.json();
+    SYNC.serverVer = body.ver || 0;
+    localStorage.setItem('nest.ver', SYNC.serverVer);
+    let changed = false;
+    if (body.env){
+      const remote = await decryptEnvelope(body.env); // throws on corrupt/wrong key
+      changed = mergeRemote(remote);
+      if (changed){ saveData(); renderCurrent(); }
+    } else if (countEntities(DATA) > 0){
+      SYNC.dirty = true; // fresh room, we have data -> needs first push
+    }
+    if (!quiet) setSync(SYNC.dirty ? 'syncing' : 'synced');
+    return changed;
+  } catch (e) {
+    if (!quiet) setSync('offline');
+    throw e;
+  }
+}
+async function syncPush(){
+  if (!CRYPTO || SYNC.inflight) return;
+  SYNC.inflight = true;
+  setSync('syncing');
+  try {
+    for (let attempt = 0; attempt < 2; attempt++){
+      await syncPull(true);
+      SYNC.dirty = false;
+      const env = await encryptState();
+      const res = await fetch(SYNC_URL + '/state/' + CRYPTO.roomId, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Nest-Auth': CRYPTO.authToken },
+        body: JSON.stringify({ baseVer: SYNC.serverVer, env }),
+      });
+      if (res.status === 409) continue;      // lost the race — merge again
+      if (res.status === 401){ setSync('locked'); return; }
+      if (!res.ok) throw 0;
+      const body = await res.json();
+      SYNC.serverVer = body.ver;
+      localStorage.setItem('nest.ver', body.ver);
+      setSync('synced');
+      return;
+    }
+    SYNC.dirty = true; setSync('offline');
+  } catch (e) {
+    SYNC.dirty = true; setSync('offline'); // retried on next mutation/foreground
+  } finally {
+    SYNC.inflight = false;
+  }
+}
+const schedulePush = debounce(() => { syncPush(); }, 2500);
+async function enableSync(pass){
+  localStorage.setItem('nest.pass', pass);
+  CRYPTO = await deriveKeys(pass);
+  if (countEntities(DATA) > 0) SYNC.dirty = true;
+  try { await syncPull(); } catch (e) {}
+  if (SYNC.dirty) await syncPush();
+}
+function disableSync(){
+  localStorage.removeItem('nest.pass');
+  CRYPTO = null;
+  SYNC.dirty = false;
+  setSync('local');
+}
+
+/* ============================ BACKUP ============================ */
+function exportBackup(){
+  const blob = new Blob([JSON.stringify({ app: 'nest', v: 1, exportedAt: nowISO(), data: DATA }, null, 1)],
+    { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'nest-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+function importBackup(text, mode){
+  let obj;
+  try { obj = JSON.parse(text); } catch (e) { return { error: 'Not valid JSON' }; }
+  const data = obj && obj.app === 'nest' ? obj.data : obj;
+  if (!data || typeof data !== 'object' || !data.txns) return { error: 'Not a Nest backup' };
+  if (mode === 'replace'){
+    DATA = data;
+    for (const m of SYNC_MAPS) DATA[m] = DATA[m] || {};
+  } else {
+    mergeRemote(data);
+  }
+  saveNow(); markDirty();
+  return { ok: true, entities: countEntities(data) };
+}
+
+/* ============================ UI HELPERS ============================ */
+function el(tag, attrs, html){
+  const n = document.createElement(tag);
+  if (attrs) for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (html != null) n.innerHTML = html;
+  return n;
+}
+function toast(msg){
+  const t = el('div', { class: 'toast' }, esc(msg));
+  $('#toast-root').appendChild(t);
+  setTimeout(() => t.remove(), 2600);
+}
+// modal(title, html) -> {node, close}. Wire events on .node after creation.
+function modal(title, html){
+  const root = $('#modal-root');
+  root.innerHTML = '';
+  const overlay = el('div', { class: 'overlay' });
+  const sheet = el('div', { class: 'sheet' },
+    (title ? '<h3>' + esc(title) + '</h3>' : '') + html);
+  overlay.appendChild(sheet);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  root.appendChild(overlay);
+  function close(){ overlay.remove(); }
+  return { node: sheet, close };
+}
+function confirmDlg(msg, okLabel){
+  return new Promise((resolve) => {
+    const m = modal('', '<p style="margin:0 0 16px">' + esc(msg) + '</p>' +
+      '<div class="row"><button class="btn grow" data-x="no">Cancel</button>' +
+      '<button class="btn btn-danger grow" data-x="yes">' + esc(okLabel || 'Confirm') + '</button></div>');
+    m.node.querySelector('[data-x=no]').onclick = () => { m.close(); resolve(false); };
+    m.node.querySelector('[data-x=yes]').onclick = () => { m.close(); resolve(true); };
+  });
+}
+function catLabel(catId){
+  if (catId === '__uncat' || !catId) return { icon: '❓', name: 'Uncategorized' };
+  const c = DATA.cats[catId];
+  return c ? { icon: c.icon || '•', name: c.name } : { icon: '•', name: catId };
+}
+
+/* ============================ ROUTER ============================ */
+let CURRENT_TAB = 'home';
+const MORE_STACK = []; // sub-screens inside the More tab: [{title, render}]
+function bindNav(){
+  document.querySelectorAll('nav.tabs button').forEach((b) => {
+    b.onclick = () => showTab(b.dataset.tab);
+  });
+}
+function showTab(name){
+  CURRENT_TAB = name;
+  if (name !== 'more') MORE_STACK.length = 0;
+  document.querySelectorAll('nav.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
+  renderCurrent();
+}
+function renderCurrent(){
+  ({ home: renderHome, review: renderReview, activity: renderActivity,
+     trends: renderTrends, more: renderMore }[CURRENT_TAB])();
+  updateReviewBadge();
+}
+function updateReviewBadge(){
+  const n = reviewTxns().length;
+  const b = $('#review-badge');
+  b.style.display = n ? 'flex' : 'none';
+  b.textContent = n > 99 ? '99+' : n;
+}
+// Open a sub-screen inside the More tab (used for Sync, Import, Budgets, ...).
+function openScreen(title, renderFn){
+  showTab('more');
+  MORE_STACK.push({ title, render: renderFn });
+  renderMore();
+}
+function popScreen(){
+  MORE_STACK.pop();
+  renderMore();
+}
+function openSyncSettings(){ openScreen('Sync', renderSyncScreen); }
+
+/* ============================ VIEWS ============================
+   Implemented per SPEC.md. Each render function owns its container
+   (#view-<tab>) and rebuilds it idempotently from DATA + UI state. */
+function renderHome(){ $('#view-home').innerHTML = '<div class="empty">TODO — SPEC.md §Home</div>'; }
+function renderReview(){ $('#view-review').innerHTML = '<div class="empty">TODO — SPEC.md §Review</div>'; }
+function renderActivity(){ $('#view-activity').innerHTML = '<div class="empty">TODO — SPEC.md §Activity</div>'; }
+function renderTrends(){ $('#view-trends').innerHTML = '<div class="empty">TODO — SPEC.md §Trends</div>'; }
+function renderMore(){ $('#view-more').innerHTML = '<div class="empty">TODO — SPEC.md §More</div>'; }
+function renderSyncScreen(container){ container.innerHTML = '<div class="empty">TODO — SPEC.md §Sync</div>'; }
+
+/* ============================ BOOT ============================ */
+loadData();
+bindNav();
+showTab('home');
+setSync('local');
+if ('serviceWorker' in navigator)
+  window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch(() => {}); });
+{
+  const pass = localStorage.getItem('nest.pass');
+  if (pass) deriveKeys(pass).then((k) => {
+    CRYPTO = k;
+    syncPull().then(() => { if (SYNC.dirty) syncPush(); }).catch(() => {});
+  });
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden){ saveNow(); }
+  else if (CRYPTO){ SYNC.dirty ? syncPush() : syncPull().catch(() => {}); }
+});
+window.addEventListener('beforeunload', saveNow);
+</script>
+</body>
+</html>
