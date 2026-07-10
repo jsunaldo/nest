@@ -180,6 +180,10 @@ table.map-tbl th{color:var(--dim); font-weight:600}
 input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 .rule-pat{font-family:ui-monospace,Menlo,monospace; font-size:12px; background:var(--bg);
   border:1px solid var(--line); border-radius:6px; padding:2px 6px; overflow-wrap:anywhere}
+.sub-head{font-size:13px; font-weight:600; color:var(--dim); padding:9px 2px 5px 14px; border-bottom:1px solid var(--line);
+  margin-left:6px; border-left:2px solid var(--line)}
+.sub-head span:last-child{font-variant-numeric:tabular-nums}
+.list-item.sub-item{padding-left:20px; margin-left:6px; border-left:2px solid var(--line)}
 </style>
 </head>
 <body>
@@ -221,7 +225,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v3.4'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v3.5'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -229,8 +233,7 @@ const TOMBSTONE_DAYS = 90;
 
 const GROUPS = [
   { id: 'g-inc',   name: 'Income',      kind: 'income' },
-  { id: 'g-hou',   name: 'Housing' },
-  { id: 'g-house', name: 'House Setup', excludeFromBaseline: true }, // new-house one-time spend
+  { id: 'g-hou',   name: 'Housing' }, // House Setup is now a subcategory here (see migration v1)
   { id: 'g-event', name: 'Big Events', excludeFromBaseline: true },  // weddings etc. — one-time, not "natural" spend
   { id: 'g-food',  name: 'Food' },
   { id: 'g-tr',    name: 'Transport' },
@@ -400,7 +403,32 @@ function loadData(){
   if (!DATA || typeof DATA !== 'object') DATA = {};
   for (const m of SYNC_MAPS) DATA[m] = DATA[m] || {};
   seedIfEmpty();
+  runMigrations();
   purgeTombstones();
+}
+// One-time, versioned data reshapes. Runs after seed so it can reorganize the
+// seed categories on both new and existing installs.
+function runMigrations(){
+  const cur = (DATA.kv.migrations && DATA.kv.migrations.v) || 0;
+  const setCat = (id, patch) => { const c = DATA.cats[id]; if (c && !c.deleted){ Object.assign(c, patch); put('cats', c); } };
+  if (cur < 1){
+    // v3.5 — subcategories. Utilities under Housing; House Setup becomes a
+    // subcategory of Housing (its cats kept one-time); Maintenance joins it;
+    // Car Payment splits into Jason's + Shannon's.
+    for (const id of ['hou-elec', 'hou-gas', 'hou-water', 'hou-net']) setCat(id, { sub: 'Utilities' });
+    for (const id of ['hs-furn', 'hs-reno', 'hs-move']) setCat(id, { group: 'g-hou', sub: 'House Setup', oneTime: true });
+    setCat('hou-maint', { sub: 'House Setup' });
+    setCat('tr-car', { name: 'Jason Car Payment', sub: 'Car Payment' });
+    if (!DATA.cats['tr-car-s'])
+      put('cats', { id: 'tr-car-s', group: 'g-tr', sub: 'Car Payment', name: 'Shannon Car Payment', icon: '🚗', kind: 'expense' });
+    put('kv', { id: 'migrations', v: 1 });
+  }
+}
+// Distinct subcategory names used within a group (in category order).
+function subsInGroup(groupId){
+  const seen = [];
+  for (const c of liveCats()) if (c.group === groupId && c.sub && !seen.includes(c.sub)) seen.push(c.sub);
+  return seen;
 }
 const saveData = debounce(() => { try { localStorage.setItem(LSKEY, JSON.stringify(DATA)); } catch (e) {} }, 250);
 const saveNow = () => saveData.now();
@@ -1326,8 +1354,13 @@ function openCatPicker(opts){
       if (g.kind === 'system' && !opts.showSystem) continue;
       const cats = liveCats().filter((c) => c.group === g.id);
       if (!cats.length) continue;
-      html += '<div class="group-label">' + esc(g.name) + '</div><div class="cat-grid">' +
-        cats.map((c) => catBtnHTML(c.id)).join('') + '</div>';
+      html += '<div class="group-label">' + esc(g.name) + '</div>';
+      const bySub = {}, direct = [];
+      for (const c of cats){ if (c.sub){ (bySub[c.sub] = bySub[c.sub] || []).push(c); } else direct.push(c); }
+      if (direct.length) html += '<div class="cat-grid">' + direct.map((c) => catBtnHTML(c.id)).join('') + '</div>';
+      for (const s in bySub)
+        html += '<div class="tiny" style="margin:8px 0 4px;color:var(--faint)">' + esc(s) + '</div><div class="cat-grid">' +
+          bySub[s].map((c) => catBtnHTML(c.id)).join('') + '</div>';
     }
     const m = modal(opts.title || 'Category', html, () => { if (!done){ done = true; resolve(null); } });
     m.node.querySelectorAll('[data-cat]').forEach((b) => {
@@ -1605,17 +1638,28 @@ function importOneFile(a){
 // is net invested. Rows carry data-cat for tap-through. Reused on Home + months.
 function groupedCatHTML(spendMap, incomeMap, investMap){
   const hdr = (label, amtStr, color) => '<div class="group-label row" style="margin-top:12px"><span class="grow">' + label + '</span><span style="color:' + (color || 'var(--dim)') + '">' + amtStr + '</span></div>';
-  const row = (cid, amtStr, color) => { const cl = catLabel(cid); return '<div class="list-item" data-cat="' + esc(cid) + '"><span class="ic">' + cl.icon + '</span><div class="body"><div class="t1">' + esc(cl.name) + '</div></div><span class="amt" style="color:' + color + '">' + amtStr + '</span></div>'; };
+  const subHdr = (label, amtStr) => '<div class="sub-head row"><span class="grow">' + esc(label) + '</span><span>−' + fmt$(amtStr) + '</span></div>';
+  const row = (cid, amtStr, color, indent) => { const cl = catLabel(cid); return '<div class="list-item' + (indent ? ' sub-item' : '') + '" data-cat="' + esc(cid) + '"><span class="ic">' + cl.icon + '</span><div class="body"><div class="t1">' + esc(cl.name) + '</div></div><span class="amt" style="color:' + color + '">' + amtStr + '</span></div>'; };
   let html = '';
   const inc = Object.keys(incomeMap || {}).filter((c) => incomeMap[c] > 0).sort((a, b) => incomeMap[b] - incomeMap[a]);
   if (inc.length){ const t = inc.reduce((s, c) => s + incomeMap[c], 0);
     html += hdr('💰 Money in', '+' + fmt$(t), 'var(--status-good)') + inc.map((c) => row(c, '+' + fmt$(incomeMap[c]), 'var(--status-good)')).join(''); }
   for (const g of GROUPS){
     if (g.kind === 'income' || g.kind === 'system') continue;
-    const cats = Object.keys(spendMap).filter((c) => spendMap[c] > 0 && DATA.cats[c] && DATA.cats[c].group === g.id).sort((a, b) => spendMap[b] - spendMap[a]);
+    const cats = Object.keys(spendMap).filter((c) => spendMap[c] > 0 && DATA.cats[c] && DATA.cats[c].group === g.id);
     if (!cats.length) continue;
     const t = cats.reduce((s, c) => s + spendMap[c], 0);
-    html += hdr(g.name, '−' + fmt$(t)) + cats.map((c) => row(c, '−' + fmt$(spendMap[c]), 'var(--text)')).join('');
+    html += hdr(g.name, '−' + fmt$(t));
+    // Build ordered items: direct categories + subcategory bundles, sorted by amount.
+    const bySub = {}, direct = [];
+    for (const c of cats){ const s = DATA.cats[c].sub; if (s){ (bySub[s] = bySub[s] || []).push(c); } else direct.push(c); }
+    const items = direct.map((c) => ({ kind: 'cat', cid: c, amt: spendMap[c] }));
+    for (const s in bySub) items.push({ kind: 'sub', name: s, cats: bySub[s], amt: bySub[s].reduce((sum, c) => sum + spendMap[c], 0) });
+    items.sort((a, b) => b.amt - a.amt);
+    for (const it of items){
+      if (it.kind === 'cat') html += row(it.cid, '−' + fmt$(it.amt), 'var(--text)');
+      else html += subHdr(it.name, it.amt) + it.cats.sort((a, b) => spendMap[b] - spendMap[a]).map((c) => row(c, '−' + fmt$(spendMap[c]), 'var(--text)', true)).join('');
+    }
   }
   if (spendMap.__uncat > 0) html += hdr('❓ Needs review', '−' + fmt$(spendMap.__uncat), 'var(--status-warn)') + row('__uncat', '−' + fmt$(spendMap.__uncat), 'var(--text)');
   const inv = Object.keys(investMap || {}).filter((c) => investMap[c] !== 0).sort((a, b) => Math.abs(investMap[b]) - Math.abs(investMap[a]));
@@ -2444,24 +2488,31 @@ function renderBudgetsScreen(c){
     (sugg.months ? 'Suggestions come from your <b>' + esc(sugg.basis) + '</b> actuals (' + sugg.months + ' full month' + (sugg.months > 1 ? 's' : '') + '). Steady bills like the mortgage suggest their exact amount (“fixed”); variable ones suggest the average (“avg”). Tap one to use it.' : 'Suggestions appear once a full month of data exists.') + '</p>' +
     (sugg.months ? '<button class="btn btn-sm btn-block" data-x="fillall" style="margin-bottom:8px">💡 Fill empty budgets from actuals</button>' : '');
   let total = 0;
+  const budgetRow = (cat, indent) => {
+    const b = DATA.budgets[cat.id];
+    const explicit = (b && !b.deleted && b.amt > 0) ? b.amt : null;
+    const bf = budgetFor(cat.id, baseline);
+    if (bf) total += bf.amt;
+    const baseTxt = baseline && baseline.cats[cat.id] ? fmt$(baseline.cats[cat.id]) : '—';
+    const sugTxt = sugg.cats[cat.id]
+      ? ' · <a data-sug="' + esc(cat.id) + '" style="cursor:pointer">' + (sugg.stable[cat.id] ? 'fixed ' : 'avg ') + fmt$(sugg.cats[cat.id]) + ' — use</a>' : '';
+    return '<div class="list-item' + (indent ? ' sub-item' : '') + '" style="cursor:default"><span class="ic">' + esc(cat.icon || '•') + '</span>' +
+      '<div class="body"><div class="t1">' + esc(cat.name) + '</div><div class="t2">baseline ' + baseTxt + sugTxt + '</div></div>' +
+      '<input class="budget-in" type="number" min="0" step="1" inputmode="decimal" data-bcat="' + esc(cat.id) + '"' +
+      ' value="' + (explicit != null ? (explicit / 100) : '') + '"' +
+      ' placeholder="' + (baseline && baseline.cats[cat.id] ? Math.round(baseline.cats[cat.id] / 100) : '·') + '"></div>';
+  };
   for (const g of GROUPS){
     if (g.kind === 'income' || g.kind === 'system') continue;
     const cats = liveCats().filter((cat) => cat.group === g.id && (cat.kind || 'expense') === 'expense');
     if (!cats.length) continue;
     html += '<div class="group-label">' + esc(g.name) + (g.excludeFromBaseline ? ' · not in baseline' : '') + '</div>';
-    for (const cat of cats){
-      const b = DATA.budgets[cat.id];
-      const explicit = (b && !b.deleted && b.amt > 0) ? b.amt : null;
-      const bf = budgetFor(cat.id, baseline);
-      if (bf) total += bf.amt;
-      const baseTxt = baseline && baseline.cats[cat.id] ? fmt$(baseline.cats[cat.id]) : '—';
-      const sugTxt = sugg.cats[cat.id]
-        ? ' · <a data-sug="' + esc(cat.id) + '" style="cursor:pointer">' + (sugg.stable[cat.id] ? 'fixed ' : 'avg ') + fmt$(sugg.cats[cat.id]) + ' — use</a>' : '';
-      html += '<div class="list-item" style="cursor:default"><span class="ic">' + esc(cat.icon || '•') + '</span>' +
-        '<div class="body"><div class="t1">' + esc(cat.name) + '</div><div class="t2">baseline ' + baseTxt + sugTxt + '</div></div>' +
-        '<input class="budget-in" type="number" min="0" step="1" inputmode="decimal" data-bcat="' + esc(cat.id) + '"' +
-        ' value="' + (explicit != null ? (explicit / 100) : '') + '"' +
-        ' placeholder="' + (baseline && baseline.cats[cat.id] ? Math.round(baseline.cats[cat.id] / 100) : '·') + '"></div>';
+    const bySub = {}, direct = [];
+    for (const cat of cats){ if (cat.sub){ (bySub[cat.sub] = bySub[cat.sub] || []).push(cat); } else direct.push(cat); }
+    for (const cat of direct) html += budgetRow(cat, false);
+    for (const s in bySub){
+      html += '<div class="sub-head row"><span class="grow">' + esc(s) + '</span></div>';
+      for (const cat of bySub[s]) html += budgetRow(cat, true);
     }
   }
   html += '<div class="row" style="margin-top:10px"><div class="grow"><b>Total monthly budget</b></div><b>' + fmt$(total) + '</b></div></div>';
@@ -2647,19 +2698,27 @@ function renderCatsScreen(c){
       '</div>';
   }
   html += '<div class="card"><h3>Categories</h3>';
+  const catRow = (cat, indent) => {
+    const k = cat.kind || 'expense';
+    const kindTag = k === 'income' ? '<span class="tiny" style="color:var(--status-good)">income</span>'
+      : k === 'invest' ? '<span class="tiny" style="color:var(--blue)">investment</span>'
+      : k === 'transfer' ? '<span class="tiny" style="color:var(--dim)">transfer</span>' : '';
+    const otTag = catExcludedFromEstimates(cat) ? '<span class="tiny" style="color:var(--faint)"> · one-time</span>' : '';
+    return '<div class="list-item' + (indent ? ' sub-item' : '') + '" data-cid="' + esc(cat.id) + '"><span class="ic">' + esc(cat.icon || '•') + '</span>' +
+      '<div class="body"><div class="t1">' + esc(cat.name) + '</div>' +
+      (kindTag || otTag ? '<div class="t2">' + kindTag + otTag + '</div>' : '') + '</div><span class="menu-chev">›</span></div>';
+  };
   for (const g of GROUPS){
     const cats = liveCats().filter((cat) => cat.group === g.id);
+    if (!cats.length && g.kind === 'system') continue;
     html += '<div class="group-label row"><span class="grow">' + esc(g.name) + '</span>' +
       (g.kind === 'system' ? '' : '<a data-gadd="' + g.id + '" style="cursor:pointer">＋ add</a>') + '</div>';
-    for (const cat of cats){
-      const k = cat.kind || 'expense';
-      const kindTag = k === 'income' ? '<span class="tiny" style="color:var(--status-good)">income</span>'
-        : k === 'invest' ? '<span class="tiny" style="color:var(--blue)">investment</span>'
-        : k === 'transfer' ? '<span class="tiny" style="color:var(--dim)">transfer</span>' : '';
-      const otTag = catExcludedFromEstimates(cat) ? '<span class="tiny" style="color:var(--faint)"> · one-time</span>' : '';
-      html += '<div class="list-item" data-cid="' + esc(cat.id) + '"><span class="ic">' + esc(cat.icon || '•') + '</span>' +
-        '<div class="body"><div class="t1">' + esc(cat.name) + '</div>' +
-        (kindTag || otTag ? '<div class="t2">' + kindTag + otTag + '</div>' : '') + '</div><span class="menu-chev">›</span></div>';
+    const bySub = {}, direct = [];
+    for (const cat of cats){ if (cat.sub){ (bySub[cat.sub] = bySub[cat.sub] || []).push(cat); } else direct.push(cat); }
+    for (const cat of direct) html += catRow(cat, false);
+    for (const s in bySub){
+      html += '<div class="sub-head row"><span class="grow">' + esc(s) + '</span></div>';
+      for (const cat of bySub[s]) html += catRow(cat, true);
     }
   }
   html += '</div>';
@@ -2679,12 +2738,17 @@ function renderCatsScreen(c){
       const m = modal('New category',
         '<label class="fld"><span>Name</span><input type="text" data-x="nm"></label>' +
         '<label class="fld"><span>Icon (one emoji)</span><input type="text" data-x="ic" maxlength="4" placeholder="🧺"></label>' +
+        '<label class="fld"><span>Subcategory (optional)</span><input type="text" data-x="sub" list="dl-addsub" placeholder="e.g. Utilities"></label>' +
+        '<datalist id="dl-addsub">' + subsInGroup(gid).map((s) => '<option value="' + esc(s) + '"></option>').join('') + '</datalist>' +
         '<button class="btn btn-primary btn-block" data-x="sv">Add</button>');
       m.node.querySelector('[data-x=sv]').onclick = () => {
         const name = m.node.querySelector('[data-x=nm]').value.trim();
         if (!name) return;
-        put('cats', { id: uid(), group: gid, name, icon: m.node.querySelector('[data-x=ic]').value.trim() || '•',
-          kind: gid === 'g-inc' ? 'income' : 'expense' });
+        const sv = m.node.querySelector('[data-x=sub]').value.trim();
+        const nc = { id: uid(), group: gid, name, icon: m.node.querySelector('[data-x=ic]').value.trim() || '•',
+          kind: gid === 'g-inc' ? 'income' : 'expense' };
+        if (sv) nc.sub = sv;
+        put('cats', nc);
         m.close(); renderCatsScreen(c); toast('Category added');
       };
     };
@@ -2701,10 +2765,15 @@ function renderCatsScreen(c){
         [['expense', 'Expense (money out)'], ['income', 'Income (money in)'], ['invest', 'Investment (not spending)'], ['transfer', 'Transfer (ignored in totals)']]
           .map(([v, lbl]) => '<option value="' + v + '"' + (curKind === v ? ' selected' : '') + '>' + lbl + '</option>').join('') +
         '</select></label>';
+      const gName = (GROUPS.find((x) => x.id === cat.group) || {}).name || '';
+      const subSel = isSystem ? '' :
+        '<label class="fld"><span>Subcategory — groups it inside ' + esc(gName) + '</span>' +
+        '<input type="text" data-x="sub" list="dl-subs" value="' + esc(cat.sub || '') + '" placeholder="e.g. Utilities (optional)"></label>' +
+        '<datalist id="dl-subs">' + subsInGroup(cat.group).map((s) => '<option value="' + esc(s) + '"></option>').join('') + '</datalist>';
       const m = modal('Edit category',
         '<label class="fld"><span>Name</span><input type="text" data-x="nm" value="' + esc(cat.name) + '"></label>' +
         '<label class="fld"><span>Icon</span><input type="text" data-x="ic" maxlength="4" value="' + esc(cat.icon || '') + '"></label>' +
-        kindSel +
+        kindSel + subSel +
         '<label class="row" style="margin:0 0 12px"><input type="checkbox" data-x="ot" style="width:auto"' +
           ((cat.oneTime || forcedOneTime) ? ' checked' : '') + (forcedOneTime ? ' disabled' : '') + '> ' +
           '<span class="muted">One-time — exclude from future forecasts &amp; the baseline' + (forcedOneTime ? ' (always, for this group)' : '') + '</span></label>' +
@@ -2716,6 +2785,7 @@ function renderCatsScreen(c){
         if (!name) return;
         cat.name = name; cat.icon = m.node.querySelector('[data-x=ic]').value.trim() || '•';
         if (!isSystem) cat.kind = m.node.querySelector('[data-x=kind]').value;
+        if (!isSystem){ const sv = m.node.querySelector('[data-x=sub]').value.trim(); if (sv) cat.sub = sv; else delete cat.sub; }
         if (!forcedOneTime) cat.oneTime = m.node.querySelector('[data-x=ot]').checked;
         put('cats', cat); m.close(); renderCatsScreen(c); renderCurrent();
         toast('Category updated');
