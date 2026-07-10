@@ -219,7 +219,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v3.2'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v3.3'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -868,7 +868,9 @@ function monthDiff(a, b){
 }
 // Generic bank descriptors that are payment METHODS, not merchants — a "CHECK"
 // could be lawn care, a plumber, or a gift. Never group these by name.
-const RECUR_GENERIC = /\b(CHECK|CHK|DEBIT|CREDIT|DEPOSIT|WITHDRAWAL|ACH|ATM|WIRE|CASH|POS|ELECTRONIC|MOBILE DEPOSIT|BILLPAY|BILL PAY|E-?PAYMENT|ONLINE XFER|ONLINE TRANSFER|TRANSFER|AUTOPAY|PAYMENT THANK YOU)\b/;
+// Anchored at the START — only when the descriptor LEADS with a bare payment
+// method (so "CHECK # 108" is generic, but "CHASE CRD AUTOPAY" keeps its payee).
+const RECUR_GENERIC = /^(CHECK|CHK|DEBIT|CREDIT|DEPOSIT|MOBILE DEPOSIT|WITHDRAWAL|ACH|ATM|WIRE|CASH|POS|ELECTRONIC|BILLPAY|BILL PAY|E-?PAYMENT)\b/;
 function recurNameMap(){ return (DATA.kv.recurNames && DATA.kv.recurNames.map) || {}; }
 function setRecurName(key, label){
   const ent = DATA.kv.recurNames || { id: 'recurNames', map: {} };
@@ -886,10 +888,14 @@ function detectRecurring(){
   for (const t of liveTxns()){
     if (t.status === 'excluded' || t.amt >= 0) continue;
     if (t.splits && t.splits.length) continue;
+    // One-off money can't be "recurring" — skip anything that doesn't project
+    // forward (Wedding, House Setup, one-time-flagged categories, or a per-txn
+    // "Never" override). Transfers still qualify (they DO recur).
+    if (!txnProjects(t, t.cat || '__uncat')) continue;
     const generic = RECUR_GENERIC.test(t.m);
     let key, label;
     if (!generic){ key = 'm:' + t.m; label = t.m; }
-    else if (t.cat && t.cat !== '__uncat' && catKind(t.cat) !== 'transfer'){ key = 'c:' + t.cat; label = catLabel(t.cat).name; }
+    else if (t.cat && t.cat !== '__uncat'){ key = 'c:' + t.cat; label = catLabel(t.cat).name; }
     else continue; // generic descriptor with no usable category — can't identify it
     (groups[key] = groups[key] || { key, label, cat: t.cat, txns: [] }).txns.push(t);
   }
