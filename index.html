@@ -223,6 +223,7 @@ const GROUPS = [
   { id: 'g-inc',   name: 'Income',      kind: 'income' },
   { id: 'g-hou',   name: 'Housing' },
   { id: 'g-house', name: 'House Setup', excludeFromBaseline: true }, // new-house one-time spend
+  { id: 'g-event', name: 'Big Events', excludeFromBaseline: true },  // weddings etc. — one-time, not "natural" spend
   { id: 'g-food',  name: 'Food' },
   { id: 'g-tr',    name: 'Transport' },
   { id: 'g-shop',  name: 'Shopping' },
@@ -244,9 +245,11 @@ const SEED_CATS = [
   ['hs-furn',   'g-house','Furniture & Decor', '🛋️'],
   ['hs-reno',   'g-house','Renovation', '🔨'],
   ['hs-move',   'g-house','Moving Costs', '📦'],
+  ['wed',       'g-event','Wedding', '💍'],
   ['food-gro',  'g-food', 'Groceries', '🛒'],
   ['food-rest', 'g-food', 'Dining Out', '🍽️'],
   ['food-cof',  'g-food', 'Coffee & Takeout', '☕'],
+  ['alc',       'g-food', 'Alcohol', '🍺'],
   ['tr-gas',    'g-tr',   'Gas', '⛽'],
   ['tr-car',    'g-tr',   'Car Payment', '🚗'],
   ['tr-ins',    'g-tr',   'Auto Insurance', '🚦'],
@@ -286,6 +289,11 @@ const SEED_RULES = [
   ['ANNUAL MEMBERSHIP FEE', 'mo-fee'],
   ['NETFLIX', 'en-stream'],
   ['SPOTIFY', 'en-stream'],
+  // APPEND-ONLY below this line — seed-rule ids are index-based, never reorder.
+  ['TOTAL WINE', 'alc'],
+  ['LIQUOR', 'alc'],
+  ['BOTTLE KING', 'alc'],
+  ['WINE & SPIRITS', 'alc'],
 ];
 
 /* ============================ UTILS ============================ */
@@ -382,16 +390,14 @@ function softDelete(mapName, id){
   put(mapName, ent);
 }
 function seedIfEmpty(){
-  if (!Object.keys(DATA.cats).length){
-    for (const [id, group, name, icon, kind] of SEED_CATS)
-      DATA.cats[id] = { id, group, name, icon, kind: kind || 'expense', updatedAt: SEED_TS };
-  }
-  if (!Object.keys(DATA.rules).length){
-    SEED_RULES.forEach(([pattern, cat], i) => {
-      const id = 'seed-r' + i;
-      DATA.rules[id] = { id, type: 'contains', pattern, cat, updatedAt: SEED_TS };
-    });
-  }
+  // Upsert-if-missing, so new seed cats/rules reach EXISTING installs after an
+  // app update. User-archived seeds stay archived (tombstone id still present).
+  for (const [id, group, name, icon, kind] of SEED_CATS)
+    if (!DATA.cats[id]) DATA.cats[id] = { id, group, name, icon, kind: kind || 'expense', updatedAt: SEED_TS };
+  SEED_RULES.forEach(([pattern, cat], i) => {
+    const id = 'seed-r' + i;
+    if (!DATA.rules[id]) DATA.rules[id] = { id, type: 'contains', pattern, cat, updatedAt: SEED_TS };
+  });
   saveData();
 }
 function purgeTombstones(){
@@ -717,21 +723,37 @@ function suggestCats(m){
   }
   return order;
 }
-// Digest of un-ruled review merchants — paste to Claude, get rules JSON back.
-function exportReviewDigest(){
+// Merchant digest — paste to Claude, get rules JSON back.
+// includeAll=false: only the review queue. includeAll=true: full audit of every
+// merchant with its CURRENT category so miscategorizations can be corrected.
+// Split transactions are skipped either way — splits are deliberate decisions.
+function exportReviewDigest(includeAll){
   const byM = {};
-  for (const t of reviewTxns()){
-    const b = byM[t.m] || (byM[t.m] = { merchant: t.m, count: 0, total: 0, example: t.mraw });
-    b.count++; b.total += -t.amt;
+  for (const t of (includeAll ? liveTxns() : reviewTxns())){
+    if (t.splits && t.splits.length) continue;
+    if (includeAll && t.status === 'excluded') continue;
+    const b = byM[t.m] || (byM[t.m] = { merchant: t.m, count: 0, total: 0, example: t.mraw, cat: null, mixed: false });
+    b.count++; b.total += Math.abs(t.amt);
+    const cur = t.status === 'review' ? 'REVIEW' : (t.cat || 'REVIEW');
+    if (b.cat === null) b.cat = cur; else if (b.cat !== cur) b.mixed = true;
   }
   const list = Object.values(byM).sort((a, b) => b.total - a.total)
-    .map((x) => ({ merchant: x.merchant, count: x.count, total: fmt$(x.total), example: x.example }));
+    .map((x) => {
+      const row = { merchant: x.merchant, count: x.count, total: fmt$(x.total), example: x.example };
+      if (includeAll) row.current = x.mixed ? 'MIXED' : x.cat;
+      return row;
+    });
   const catList = liveCats().map((c) => c.id + ' = ' + c.name).join('\n');
-  return 'NEST REVIEW DIGEST — for each merchant below, reply with rules JSON: ' +
-    '[{"pattern":"MERCHANT TEXT","cat":"cat-id"}] using these category ids:\n' +
-    catList + '\n\nMERCHANTS:\n' + JSON.stringify(list, null, 1);
+  const head = includeAll
+    ? 'NEST AUDIT DIGEST — every merchant with its CURRENT category. Reply ONLY with corrections, as rules JSON ' +
+      '[{"pattern":"MERCHANT TEXT","cat":"cat-id"}], for merchants whose category is wrong, REVIEW, or MIXED — omit the ones that are fine. Category ids:\n'
+    : 'NEST REVIEW DIGEST — for each merchant below, reply with rules JSON: ' +
+      '[{"pattern":"MERCHANT TEXT","cat":"cat-id"}] using these category ids:\n';
+  return head + catList + '\n\nMERCHANTS:\n' + JSON.stringify(list, null, 1);
 }
-function importRulesJSON(text){
+// retro=true additionally re-categorizes already-sorted transactions to match
+// the rulebook (audit mode). Splits and excluded transactions are never touched.
+function importRulesJSON(text, retro){
   let arr;
   try { arr = JSON.parse(text); } catch (e) { return { error: 'Not valid JSON' }; }
   if (!Array.isArray(arr)) return { error: 'Expected a JSON array' };
@@ -742,7 +764,20 @@ function importRulesJSON(text){
     } else bad++;
   }
   const resolved = reapplyRules();
-  return { created, bad, resolved };
+  let changed = 0;
+  if (retro){
+    for (const id in DATA.txns){
+      const t = DATA.txns[id];
+      if (t.deleted || t.status === 'excluded' || (t.splits && t.splits.length)) continue;
+      const r = matchRule(t.m);
+      if (r && t.cat !== r.cat){
+        t.cat = r.cat;
+        if (t.status === 'review') t.status = 'ok';
+        put('txns', t); changed++;
+      }
+    }
+  }
+  return { created, bad, resolved, changed };
 }
 
 /* ============================ CRYPTO (E2E) ============================ */
@@ -1372,11 +1407,14 @@ function renderHome(){
     html += '<button class="btn btn-sm btn-block" data-x="allb" style="margin-top:8px">All budgets →</button></div>';
   }
   let hs = 0;
-  for (const cat of liveCats()) if (cat.group === 'g-house') hs += mAgg.spend[cat.id] || 0;
+  for (const cat of liveCats()){
+    const g = GROUPS.find((x) => x.id === cat.group);
+    if (g && g.excludeFromBaseline) hs += mAgg.spend[cat.id] || 0;
+  }
   if (hs > 0)
     html += '<div class="card"><div class="row"><span style="font-size:18px">🏠</span>' +
-      '<div class="grow muted">House setup this month: <b style="color:var(--text)">' + fmt$(hs) + '</b>' +
-      '<div class="tiny">Kept out of your natural-budget baseline</div></div></div></div>';
+      '<div class="grow muted">One-time / big-event spending this month: <b style="color:var(--text)">' + fmt$(hs) + '</b>' +
+      '<div class="tiny">House Setup &amp; Big Events — kept out of your natural-budget baseline</div></div></div></div>';
   const recent = all.filter((t) => t.status !== 'excluded')
     .sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0)).slice(0, 6);
   html += '<div class="card"><h3>Recent activity</h3>' + recent.map((t) => txnRowHTML(t)).join('') +
@@ -1776,7 +1814,7 @@ function renderMore(){
   c.innerHTML = '<div class="card">' + items.map((it, i) =>
     '<div class="list-item" data-mi="' + i + '"><span class="ic">' + it[0] + '</span><div class="body"><div class="t1">' + it[1] +
     '</div><div class="t2">' + esc(it[2]) + '</div></div><span class="menu-chev">›</span></div>').join('') + '</div>' +
-    '<p class="tiny" style="text-align:center">Nest v1 — local-first · E2E-encrypted sync</p>';
+    '<p class="tiny" style="text-align:center">Nest v1.1 — local-first · E2E-encrypted sync</p>';
   c.querySelectorAll('[data-mi]').forEach((n2) => { n2.onclick = () => items[+n2.dataset.mi][3](); });
 }
 
@@ -2004,21 +2042,29 @@ function renderAccountsScreen(c){
 function renderClaudeScreen(c){
   const merchants = new Set(reviewTxns().map((t) => t.m)).size;
   c.innerHTML =
-    '<div class="card"><h3>1 · Copy the digest</h3>' +
-    '<p class="muted" style="margin:0 0 10px">' + (merchants ? '<b style="color:var(--text)">' + merchants + '</b> merchants are waiting in review.' : 'Review queue is empty — nothing to triage.') +
-    ' The digest lists them with your category ids; paste it into any Claude chat.</p>' +
-    '<button class="btn btn-primary btn-block" data-x="copy"' + (merchants ? '' : ' disabled') + '>📋 Copy digest</button></div>' +
+    '<div class="card"><h3>1 · Copy a digest</h3>' +
+    '<p class="muted" style="margin:0 0 10px">' + (merchants ? '<b style="color:var(--text)">' + merchants + '</b> merchants are waiting in review.' : 'Review queue is empty.') +
+    ' Paste a digest into any Claude chat; the <b>audit</b> digest includes everything already categorized so mistakes can be caught too.</p>' +
+    '<button class="btn btn-primary btn-block" data-x="copy"' + (merchants ? '' : ' disabled') + ' style="margin-bottom:8px">📋 Copy review digest</button>' +
+    '<button class="btn btn-block" data-x="copyall">🔍 Copy full audit digest (everything)</button></div>' +
     '<div class="card"><h3>2 · Paste Claude’s rules back</h3>' +
     '<textarea data-x="paste" rows="5" placeholder=\'[{"pattern":"HOME DEPOT","cat":"hou-maint"}]\'></textarea>' +
+    '<label class="row" style="margin-top:10px"><input type="checkbox" data-x="retro" style="width:auto"> ' +
+    '<span class="muted">Audit mode — also re-sort transactions that were already categorized (splits are never touched)</span></label>' +
     '<button class="btn btn-primary btn-block" data-x="apply" style="margin-top:10px">Apply rules</button></div>';
   c.querySelector('[data-x=copy]').onclick = async () => {
-    const ok = await copyText(exportReviewDigest());
-    toast(ok ? 'Digest copied — paste it to Claude' : 'Copy failed — try again');
+    const ok = await copyText(exportReviewDigest(false));
+    toast(ok ? 'Review digest copied — paste it to Claude' : 'Copy failed — try again');
+  };
+  c.querySelector('[data-x=copyall]').onclick = async () => {
+    const ok = await copyText(exportReviewDigest(true));
+    toast(ok ? 'Audit digest copied — paste it to Claude' : 'Copy failed — try again');
   };
   c.querySelector('[data-x=apply]').onclick = () => {
-    const r = importRulesJSON(c.querySelector('[data-x=paste]').value);
+    const retro = c.querySelector('[data-x=retro]').checked;
+    const r = importRulesJSON(c.querySelector('[data-x=paste]').value, retro);
     if (r.error){ toast(r.error); return; }
-    toast(r.created + ' rules added · ' + r.resolved + ' transactions sorted');
+    toast(r.created + ' rules · ' + r.resolved + ' review sorted' + (r.changed ? ' · ' + r.changed + ' re-sorted' : ''));
     renderClaudeScreen(c); updateReviewBadge();
   };
 }
