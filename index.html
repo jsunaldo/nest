@@ -17,6 +17,8 @@
   --text:#e9efe9; --dim:#8fa198; --faint:#5d6d65;
   --accent:#f0c85a; --accent-ink:#211a05;
   --green:#4cc38a; --red:#ec6f66; --blue:#6ea8dc; --purple:#b18ae0;
+  --viz-1:#3987e5; --viz-2:#199e70; --viz-3:#c98500; --viz-4:#008300; --viz-5:#9085e9; --viz-6:#e66767;
+  --viz-other:#6a7a72; --status-good:#0ca30c; --status-warn:#fab219; --status-crit:#d03b3b;
   --radius:16px; --radius-sm:10px;
   --nav-h:calc(58px + env(safe-area-inset-bottom));
 }
@@ -97,8 +99,8 @@ label.fld span{display:block; font-size:12px; color:var(--dim); margin-bottom:4p
 .list-item .amt{font-weight:700; font-variant-numeric:tabular-nums; white-space:nowrap}
 
 .progress{height:8px; background:var(--bg); border-radius:4px; overflow:hidden; border:1px solid var(--line)}
-.progress i{display:block; height:100%; background:var(--green); border-radius:4px}
-.progress i.warn{background:var(--accent)} .progress i.over{background:var(--red)}
+.progress i{display:block; height:100%; background:var(--status-good); border-radius:4px}
+.progress i.warn{background:var(--status-warn)} .progress i.over{background:var(--status-crit)}
 
 .stat-grid{display:grid; grid-template-columns:1fr 1fr; gap:10px}
 .stat{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:12px 14px}
@@ -148,6 +150,29 @@ table.map-tbl th,table.map-tbl td{border-bottom:1px solid var(--line); padding:6
   white-space:nowrap; max-width:160px; overflow:hidden; text-overflow:ellipsis}
 table.map-tbl th{color:var(--dim); font-weight:600}
 .tbl-wrap{overflow-x:auto}
+
+/* ============================ VIEW-LAYER ADDITIONS ============================ */
+.txn-head{margin-bottom:14px}
+.review-card{padding:20px 18px; text-align:center}
+.review-card .r-amt{font-size:34px; font-weight:800; font-variant-numeric:tabular-nums}
+.review-card .r-m{font-size:17px; font-weight:700; margin-top:2px; overflow-wrap:anywhere}
+.split-row{margin-bottom:8px}
+.split-row .btn{white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:150px}
+.act-bar{position:fixed; left:0; right:0; bottom:var(--nav-h); z-index:35; background:rgba(13,20,17,.96);
+  border-top:1px solid var(--line); padding:10px 14px; display:flex; gap:8px; justify-content:center}
+.chart-caption{font-size:12.5px; color:var(--dim); margin-top:8px; min-height:18px}
+.dot-review{width:7px; height:7px; border-radius:50%; background:var(--red); flex-shrink:0}
+.li-excluded{opacity:.45}
+.li-check{width:22px; height:22px; border-radius:50%; border:1.5px solid var(--faint); flex-shrink:0;
+  display:flex; align-items:center; justify-content:center; font-size:13px}
+.li-check.on{background:var(--accent); border-color:var(--accent); color:var(--accent-ink)}
+.banner-review{border-color:var(--accent); background:rgba(240,200,90,.08); cursor:pointer}
+.menu-chev{color:var(--faint)}
+.filter-row{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px}
+.tag-x{font-size:11px; opacity:.7; margin-left:2px}
+input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
+.rule-pat{font-family:ui-monospace,Menlo,monospace; font-size:12px; background:var(--bg);
+  border:1px solid var(--line); border-radius:6px; padding:2px 6px; overflow-wrap:anywhere}
 </style>
 </head>
 <body>
@@ -896,17 +921,18 @@ function toast(msg){
   $('#toast-root').appendChild(t);
   setTimeout(() => t.remove(), 2600);
 }
-// modal(title, html) -> {node, close}. Wire events on .node after creation.
-function modal(title, html){
+// modal(title, html, onClose?) -> {node, close}. Wire events on .node after
+// creation. onClose fires exactly once however the modal is dismissed.
+function modal(title, html, onClose){
   const root = $('#modal-root');
-  root.innerHTML = '';
-  const overlay = el('div', { class: 'overlay' });
+  const overlay = el('div', { class: 'overlay' }); // stacked: picker can open above an editor sheet
   const sheet = el('div', { class: 'sheet' },
     (title ? '<h3>' + esc(title) + '</h3>' : '') + html);
   overlay.appendChild(sheet);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
   root.appendChild(overlay);
-  function close(){ overlay.remove(); }
+  let closed = false;
+  function close(){ if (closed) return; closed = true; overlay.remove(); if (onClose) onClose(); }
   return { node: sheet, close };
 }
 function confirmDlg(msg, okLabel){
@@ -965,12 +991,1113 @@ function openSyncSettings(){ openScreen('Sync', renderSyncScreen); }
 /* ============================ VIEWS ============================
    Implemented per SPEC.md. Each render function owns its container
    (#view-<tab>) and rebuilds it idempotently from DATA + UI state. */
-function renderHome(){ $('#view-home').innerHTML = '<div class="empty">TODO — SPEC.md §Home</div>'; }
-function renderReview(){ $('#view-review').innerHTML = '<div class="empty">TODO — SPEC.md §Review</div>'; }
-function renderActivity(){ $('#view-activity').innerHTML = '<div class="empty">TODO — SPEC.md §Activity</div>'; }
-function renderTrends(){ $('#view-trends').innerHTML = '<div class="empty">TODO — SPEC.md §Trends</div>'; }
-function renderMore(){ $('#view-more').innerHTML = '<div class="empty">TODO — SPEC.md §More</div>'; }
-function renderSyncScreen(container){ container.innerHTML = '<div class="empty">TODO — SPEC.md §Sync</div>'; }
+/* ---- view module state ---- */
+let LAST_IMPORT_ACCT = null;
+const REVIEW_SKIP = new Set();
+const ACT = { q: '', acct: null, cat: null, month: null, limit: 200, select: false, sel: new Set() };
+const TRENDS_SEL = { month: null };
+
+/* ---- shared helpers ---- */
+function accountName(id){ const a = DATA.accounts[id]; return a ? a.name : 'Unknown'; }
+function liveAccounts(){ return Object.values(DATA.accounts).filter((a) => !a.deleted && !a.archived); }
+function acctOptions(sel){
+  const list = liveAccounts().slice();
+  if (sel && DATA.accounts[sel] && !list.some((a) => a.id === sel)) list.push(DATA.accounts[sel]);
+  return list.map((a) => '<option value="' + esc(a.id) + '"' + (a.id === sel ? ' selected' : '') + '>' + esc(a.name) + '</option>').join('');
+}
+function catBtnHTML(id){
+  const c = DATA.cats[id];
+  if (!c || c.deleted) return '';
+  return '<button class="cat-btn" data-cat="' + esc(id) + '">' + esc(c.icon || '•') + ' ' + esc(c.name) + '</button>';
+}
+function txnIcon(t){ return (t.splits && t.splits.length) ? '🔀' : catLabel(t.cat).icon; }
+function txnRowHTML(t, opts){
+  opts = opts || {};
+  const cl = (t.splits && t.splits.length) ? { icon: '🔀', name: 'Split' } : catLabel(t.cat);
+  const cls = 'list-item' + (t.status === 'excluded' ? ' li-excluded' : '');
+  const check = opts.select
+    ? '<span class="li-check' + (ACT.sel.has(t.id) ? ' on' : '') + '">' + (ACT.sel.has(t.id) ? '✓' : '') + '</span>'
+    : '';
+  return '<div class="' + cls + '" data-txn="' + esc(t.id) + '">' + check +
+    '<span class="ic">' + txnIcon(t) + '</span>' +
+    '<div class="body"><div class="t1">' + (t.status === 'review' ? '<span class="dot-review" style="display:inline-block;margin-right:4px"></span>' : '') + esc(t.m) + '</div>' +
+    '<div class="t2">' + fmtDate(t.date) + ' · ' + esc(accountName(t.acct)) + ' · ' + esc(cl.name) +
+    (t.status === 'excluded' ? ' · excluded' : '') + '</div></div>' +
+    '<span class="amt ' + (t.amt > 0 ? 'amt-pos' : 'amt-neg') + '">' + fmt$(t.amt, { signed: t.amt > 0 }) + '</span></div>';
+}
+function copyText(s){
+  if (navigator.clipboard && navigator.clipboard.writeText)
+    return navigator.clipboard.writeText(s).then(() => true).catch(() => legacyCopy(s));
+  return Promise.resolve(legacyCopy(s));
+}
+function legacyCopy(s){
+  const ta = document.createElement('textarea');
+  ta.value = s; document.body.appendChild(ta); ta.select();
+  let ok = false; try { ok = document.execCommand('copy'); } catch (e) {}
+  ta.remove(); return ok;
+}
+
+/* ---- category picker ---- */
+function openCatPicker(opts){
+  opts = opts || {};
+  return new Promise((resolve) => {
+    let done = false;
+    let html = '';
+    if (opts.allowAll)
+      html += '<div class="cat-grid"><button class="cat-btn" data-cat="__all">✳️ All categories</button>' +
+              '<button class="cat-btn" data-cat="__uncat">❓ Uncategorized</button></div>';
+    if (opts.merchant){
+      const sugg = suggestCats(opts.merchant).slice(0, 6);
+      if (sugg.length)
+        html += '<div class="group-label">Suggested</div><div class="cat-grid">' +
+          sugg.map((id) => catBtnHTML(id)).join('') + '</div>';
+    }
+    for (const g of GROUPS){
+      if (g.kind === 'system' && !opts.showSystem) continue;
+      const cats = liveCats().filter((c) => c.group === g.id);
+      if (!cats.length) continue;
+      html += '<div class="group-label">' + esc(g.name) + '</div><div class="cat-grid">' +
+        cats.map((c) => catBtnHTML(c.id)).join('') + '</div>';
+    }
+    const m = modal(opts.title || 'Category', html, () => { if (!done){ done = true; resolve(null); } });
+    m.node.querySelectorAll('[data-cat]').forEach((b) => {
+      b.onclick = () => { done = true; resolve(b.dataset.cat); m.close(); };
+    });
+  });
+}
+
+/* ---- transaction editor ---- */
+function openTxnEditor(id){
+  const t = DATA.txns[id];
+  if (!t || t.deleted) return;
+  const cl = (t.splits && t.splits.length) ? { icon: '🔀', name: t.splits.length + '-way split' } : catLabel(t.cat);
+  const html =
+    '<div class="txn-head">' +
+      '<div class="amt-big" style="font-size:30px;font-weight:800">' + fmt$(t.amt, { signed: t.amt > 0 }) + '</div>' +
+      '<div style="font-weight:700;overflow-wrap:anywhere">' + esc(t.m) + '</div>' +
+      '<div class="tiny" style="overflow-wrap:anywhere">' + esc(t.mraw) + '</div>' +
+      '<div class="muted">' + fmtDate(t.date) + ' · ' + esc(accountName(t.acct)) + '</div>' +
+    '</div>' +
+    '<div class="card" style="padding:4px 12px;margin-bottom:10px"><div class="list-item" data-x="cat">' +
+      '<span class="ic">' + cl.icon + '</span><div class="body"><div class="t1">' + esc(cl.name) + '</div>' +
+      '<div class="t2">Tap to change category</div></div><span class="menu-chev">›</span></div></div>' +
+    '<label class="row" style="margin:0 0 12px"><input type="checkbox" data-x="always" style="width:auto"> ' +
+      '<span class="muted">Always categorize “' + esc(t.m) + '” like this</span></label>' +
+    '<div class="row" style="margin-bottom:12px">' +
+      '<button class="btn btn-sm grow" data-x="split">Split…</button>' +
+      '<button class="btn btn-sm grow" data-x="transfer">Transfer</button>' +
+      '<button class="btn btn-sm grow" data-x="excl">' + (t.status === 'excluded' ? 'Include' : 'Exclude') + '</button>' +
+    '</div>' +
+    '<label class="fld"><span>Note</span><input type="text" data-x="note" value="' + esc(t.note || '') + '"></label>' +
+    '<div class="row">' +
+      '<label class="fld grow"><span>Date</span><input type="date" data-x="date" value="' + esc(t.date) + '"></label>' +
+      '<label class="fld grow"><span>Account</span><select data-x="acct">' + acctOptions(t.acct) + '</select></label>' +
+    '</div>' +
+    '<button class="btn btn-danger btn-block" data-x="del">Delete transaction</button>';
+  const m = modal('Transaction', html);
+  const q = (s) => m.node.querySelector(s);
+  q('[data-x=cat]').onclick = async () => {
+    const cat = await openCatPicker({ merchant: t.m, showSystem: true });
+    if (!cat) return;
+    if (t.splits && t.splits.length){
+      if (!(await confirmDlg('Replace the existing split with one category?', 'Replace'))) return;
+      t.splits = null;
+    }
+    t.cat = cat;
+    if (t.status === 'review') t.status = 'ok';
+    put('txns', t);
+    if (q('[data-x=always]') && q('[data-x=always]').checked){
+      createRule(t.m, cat);
+      const n = reapplyRules();
+      if (n) toast('+' + n + ' more auto-categorized');
+    }
+    m.close(); renderCurrent(); toast('Categorized');
+  };
+  q('[data-x=split]').onclick = () => { m.close(); openSplitEditor(t); };
+  q('[data-x=transfer]').onclick = () => {
+    t.cat = 'sys-transfer'; t.splits = null;
+    if (t.status === 'review') t.status = 'ok';
+    put('txns', t); m.close(); renderCurrent(); toast('Marked as transfer');
+  };
+  q('[data-x=excl]').onclick = () => {
+    t.status = t.status === 'excluded' ? ((t.cat || (t.splits && t.splits.length)) ? 'ok' : 'review') : 'excluded';
+    put('txns', t); m.close(); renderCurrent();
+  };
+  q('[data-x=note]').onchange = (e) => { t.note = e.target.value; put('txns', t); };
+  q('[data-x=date]').onchange = (e) => { const d = parseDateISO(e.target.value); if (d){ t.date = d; put('txns', t); } };
+  q('[data-x=acct]').onchange = (e) => { t.acct = e.target.value; put('txns', t); };
+  q('[data-x=del]').onclick = async () => {
+    if (!(await confirmDlg('Delete this transaction? Re-importing the same statement will NOT bring it back.', 'Delete'))) return;
+    softDelete('txns', t.id); m.close(); renderCurrent(); toast('Deleted');
+  };
+}
+
+/* ---- split editor ---- */
+function openSplitEditor(t){
+  const sign = t.amt < 0 ? -1 : 1;
+  const totalAbs = Math.abs(t.amt);
+  const parts = (t.splits && t.splits.length)
+    ? t.splits.map((p) => ({ cat: p.cat, cents: Math.abs(p.amt) }))
+    : [{ cat: t.cat, cents: totalAbs }, { cat: null, cents: 0 }];
+  const m = modal('Split ' + fmt$(t.amt),
+    '<div class="muted" style="margin-bottom:10px">' + esc(t.m) + ' · ' + fmtDate(t.date) + '</div>' +
+    '<div data-x="rows"></div>' +
+    '<button class="btn btn-sm" data-x="add">＋ Add part</button>' +
+    '<div class="row" style="margin-top:14px"><div class="grow muted" data-x="rem"></div>' +
+    '<button class="btn btn-primary" data-x="save">Save split</button></div>');
+  const rowsC = m.node.querySelector('[data-x=rows]');
+  const sumCents = () => parts.reduce((s, p) => s + (p.cents || 0), 0);
+  function footer(){
+    const rem = totalAbs - sumCents();
+    m.node.querySelector('[data-x=rem]').textContent =
+      rem === 0 ? 'Balanced ✓' : rem > 0 ? fmt$(rem) + ' left to assign' : fmt$(-rem) + ' over';
+    m.node.querySelector('[data-x=save]').disabled = !(rem === 0 && parts.every((p) => p.cat && p.cents > 0));
+  }
+  function draw(){
+    rowsC.innerHTML = parts.map((p, i) => {
+      const cl = catLabel(p.cat);
+      return '<div class="row split-row" data-i="' + i + '">' +
+        '<button class="btn btn-sm grow" data-x="pcat" style="text-align:left">' + cl.icon + ' ' + esc(cl.name) + '</button>' +
+        '<input type="number" step="0.01" min="0" inputmode="decimal" data-x="pamt" style="max-width:104px" value="' +
+        (p.cents ? (p.cents / 100).toFixed(2) : '') + '">' +
+        '<button class="btn btn-sm" data-x="prem" title="Assign remainder">↧</button>' +
+        '<button class="btn btn-sm" data-x="pdel">×</button></div>';
+    }).join('');
+    rowsC.querySelectorAll('.split-row').forEach((rowEl) => {
+      const i = +rowEl.dataset.i, p = parts[i];
+      rowEl.querySelector('[data-x=pcat]').onclick = async () => {
+        const cat = await openCatPicker({ merchant: t.m, showSystem: true });
+        if (cat){ p.cat = cat; draw(); }
+      };
+      rowEl.querySelector('[data-x=pamt]').oninput = (e) => {
+        p.cents = Math.max(0, Math.round((parseFloat(e.target.value) || 0) * 100));
+        footer();
+      };
+      rowEl.querySelector('[data-x=prem]').onclick = () => { p.cents = Math.max(0, p.cents + (totalAbs - sumCents())); draw(); };
+      rowEl.querySelector('[data-x=pdel]').onclick = () => { if (parts.length > 1){ parts.splice(i, 1); draw(); } };
+    });
+    footer();
+  }
+  m.node.querySelector('[data-x=add]').onclick = () => { parts.push({ cat: null, cents: Math.max(0, totalAbs - sumCents()) }); draw(); };
+  m.node.querySelector('[data-x=save]').onclick = () => {
+    t.splits = parts.map((p) => ({ cat: p.cat, amt: sign * p.cents }));
+    t.cat = null;
+    if (t.status === 'review') t.status = 'ok';
+    put('txns', t); m.close(); renderCurrent(); toast('Split saved');
+  };
+  draw();
+}
+
+/* ---- import flow ---- */
+async function runImportFlow(fileList){
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  for (const f of files){
+    let text;
+    try { text = await f.text(); } catch (e) { toast('Could not read ' + f.name); continue; }
+    const a = analyzeCSV(text, f.name);
+    if (a.error){ toast(f.name + ': ' + a.error); continue; }
+    await importOneFile(a);
+  }
+  renderCurrent();
+}
+function importPrefs(){ return DATA.kv.importPrefs || { id: 'importPrefs', sigs: {} }; }
+function importOneFile(a){
+  return new Promise((resolve) => {
+    const sigKey = a.headers.join('|');
+    let acctId = importPrefs().sigs[sigKey];
+    if (!acctId || !DATA.accounts[acctId] || DATA.accounts[acctId].deleted) acctId = LAST_IMPORT_ACCT;
+    if ((!acctId || !DATA.accounts[acctId]) && liveAccounts().length === 1) acctId = liveAccounts()[0].id;
+    const mapping = Object.assign({}, a.mapping);
+    let mode = (mapping.debitIdx != null && mapping.debitIdx >= 0) ? 'dc' : 'single';
+    let customOpen = !a.preset;
+    const m = modal('Import: ' + a.filename, '<div data-x="body"></div>', () => resolve());
+    const body = m.node.querySelector('[data-x=body]');
+
+    const colSelect = (x, idx) =>
+      '<select data-x="' + x + '"><option value="-1">—</option>' +
+      a.headers.map((h, i) => '<option value="' + i + '"' + (i === idx ? ' selected' : '') + '>' + esc(h) + '</option>').join('') +
+      '</select>';
+
+    function draw(){
+      const res = applyMapping(a.dataRows, mapping);
+      const out = res.parsed.filter((p) => p.amt < 0).length;
+      const inn = res.parsed.length - out;
+      let html =
+        '<label class="fld"><span>Account</span><select data-x="acct"><option value="">Choose…</option>' +
+        acctOptions(acctId) + '<option value="__new">＋ New account…</option></select></label>' +
+        '<div data-x="newacct" style="display:none;margin-bottom:10px"><div class="row">' +
+        '<input type="text" data-x="nname" placeholder="Account name" class="grow">' +
+        '<select data-x="ntype" style="max-width:130px"><option value="credit">Credit card</option>' +
+        '<option value="checking">Checking</option><option value="savings">Savings</option></select>' +
+        '<button class="btn btn-sm" data-x="nadd">Add</button></div></div>' +
+        '<div style="margin-bottom:10px"><span class="chip' + (customOpen ? '' : ' on') + '" data-x="preset">' +
+        (a.preset ? esc(a.preset.label) + ' · tap to adjust' : 'Custom mapping') + '</span></div>';
+      if (customOpen){
+        html += '<div class="card" style="background:var(--card2)">' +
+          '<div class="row" style="margin-bottom:8px">' +
+          '<label class="fld grow"><span>Date column</span>' + colSelect('cdate', mapping.dateIdx) + '</label>' +
+          '<label class="fld grow"><span>Description</span>' + colSelect('cdesc', mapping.descIdx) + '</label></div>' +
+          '<div class="seg" style="margin-bottom:8px">' +
+          '<button data-x="m1" class="' + (mode === 'single' ? 'on' : '') + '">One amount column</button>' +
+          '<button data-x="m2" class="' + (mode === 'dc' ? 'on' : '') + '">Debit + credit</button></div>' +
+          (mode === 'single'
+            ? '<label class="fld"><span>Amount column</span>' + colSelect('camt', mapping.amountIdx) + '</label>'
+            : '<div class="row"><label class="fld grow"><span>Debit (money out)</span>' + colSelect('cdeb', mapping.debitIdx) + '</label>' +
+              '<label class="fld grow"><span>Credit (money in)</span>' + colSelect('ccre', mapping.creditIdx) + '</label></div>') +
+          '</div>';
+      }
+      const prevRows = res.parsed.slice(0, 5).map((p) =>
+        '<tr><td>' + p.date + '</td><td>' + esc(p.desc) + '</td><td style="text-align:right">' + fmt$(p.amt) + '</td></tr>').join('');
+      html += '<div class="tbl-wrap"><table class="map-tbl"><tr><th>Date</th><th>Description</th><th style="text-align:right">Amount</th></tr>' +
+        (prevRows || '<tr><td colspan="3" class="muted">Nothing parseable with this mapping</td></tr>') + '</table></div>' +
+        '<div class="muted" style="margin:8px 0">' + res.parsed.length + ' rows · ' + out + ' money out · ' + inn + ' money in' +
+        (res.skipped ? ' · ' + res.skipped + ' unparseable skipped' : '') + '</div>' +
+        '<label class="row" style="margin-bottom:10px"><input type="checkbox" data-x="flip" style="width:auto"' +
+        (mapping.flip ? ' checked' : '') + '> <span class="muted">Flip signs (purchases are showing as money in)</span></label>' +
+        '<button class="btn btn-primary btn-block" data-x="go"' + ((acctId && res.parsed.length) ? '' : ' disabled') + '>Import ' +
+        res.parsed.length + ' transactions</button>';
+      body.innerHTML = html;
+      bind(res);
+    }
+    function bind(res){
+      const q = (s) => body.querySelector(s);
+      q('[data-x=acct]').onchange = (e) => {
+        if (e.target.value === '__new') q('[data-x=newacct]').style.display = 'block';
+        else { acctId = e.target.value || null; draw(); }
+      };
+      if (q('[data-x=nadd]')) q('[data-x=nadd]').onclick = () => {
+        const name = q('[data-x=nname]').value.trim();
+        if (!name) return;
+        const acc = put('accounts', { id: uid(), name, type: q('[data-x=ntype]').value });
+        acctId = acc.id; draw();
+      };
+      q('[data-x=preset]').onclick = () => { customOpen = !customOpen; draw(); };
+      q('[data-x=flip]').onchange = (e) => { mapping.flip = e.target.checked; draw(); };
+      const colBind = (x, key) => { const n2 = q('[data-x=' + x + ']'); if (n2) n2.onchange = (e) => { mapping[key] = +e.target.value; draw(); }; };
+      colBind('cdate', 'dateIdx'); colBind('cdesc', 'descIdx'); colBind('camt', 'amountIdx');
+      colBind('cdeb', 'debitIdx'); colBind('ccre', 'creditIdx');
+      const seg = (x, fn) => { const n2 = q('[data-x=' + x + ']'); if (n2) n2.onclick = fn; };
+      seg('m1', () => { mode = 'single'; mapping.debitIdx = null; mapping.creditIdx = null; if (mapping.amountIdx == null) mapping.amountIdx = -1; draw(); });
+      seg('m2', () => { mode = 'dc'; mapping.amountIdx = null; if (mapping.debitIdx == null) mapping.debitIdx = -1; if (mapping.creditIdx == null) mapping.creditIdx = -1; draw(); });
+      q('[data-x=go]').onclick = () => {
+        const r = importParsed(acctId, res.parsed, a.filename);
+        const prefs = importPrefs(); prefs.sigs[sigKey] = acctId; put('kv', prefs);
+        LAST_IMPORT_ACCT = acctId;
+        body.innerHTML = '<div class="card" style="background:var(--card2)"><h3>Imported</h3>' +
+          '<p style="margin:0 0 6px">Added <b>' + r.added + '</b> · skipped <b>' + r.dupes + '</b> duplicate' + (r.dupes === 1 ? '' : 's') + '</p>' +
+          (r.from ? '<p class="muted" style="margin:0 0 6px">' + fmtDate(r.from) + ' → ' + fmtDate(r.to) + '</p>' : '') +
+          '<p style="margin:0">' + (r.review ? '<b>' + r.review + '</b> need review' : 'Everything auto-categorized 🎉') + '</p></div>' +
+          '<div class="row">' + (r.review ? '<button class="btn grow" data-x="rev">Review now</button>' : '') +
+          '<button class="btn btn-primary grow" data-x="done">Done</button></div>';
+        const rv = body.querySelector('[data-x=rev]');
+        if (rv) rv.onclick = () => { m.close(); showTab('review'); };
+        body.querySelector('[data-x=done]').onclick = () => m.close();
+      };
+    }
+    draw();
+  });
+}
+
+/* ---- §Home ---- */
+function renderHome(){
+  const c = $('#view-home');
+  const all = liveTxns();
+  if (!all.length){
+    c.innerHTML =
+      '<div class="card"><h3>Welcome to Nest 🪺</h3>' +
+      '<p style="margin:0 0 8px">Every dollar you two spend — one place, both phones.</p>' +
+      '<p class="muted" style="margin:0 0 4px">1. Import bank / card CSV statements below</p>' +
+      '<p class="muted" style="margin:0 0 4px">2. Sort the few it can’t auto-categorize (Review tab)</p>' +
+      '<p class="muted" style="margin:0">3. Set your baseline in More → Budgets, turn on Sync to share</p></div>' +
+      '<button class="btn btn-primary btn-block" data-x="import">📥 Import statements</button>';
+    c.querySelector('[data-x=import]').onclick = () => openScreen('Import', renderImportScreen);
+    return;
+  }
+  const agg = buildMonthAgg();
+  const mAgg = agg[UI.month] || { spend: {}, spendTotal: 0, incomeTotal: 0 };
+  const baseline = baselineByCat(agg);
+  let totalBudget = 0, anyBudget = false;
+  for (const cat of liveCats()){
+    if ((cat.kind || 'expense') !== 'expense') continue;
+    const b = budgetFor(cat.id, baseline);
+    if (b){ totalBudget += b.amt; anyBudget = true; }
+  }
+  const left = totalBudget - mAgg.spendTotal;
+  const rq = reviewTxns();
+  const rqOut = rq.reduce((s, t) => s + (t.amt < 0 ? -t.amt : 0), 0);
+
+  let html = '<div class="month-nav"><button data-x="prev">‹</button><b>' + fmtMonth(UI.month) + '</b>' +
+    '<button data-x="next"' + (UI.month >= currentYM() ? ' disabled' : '') + '>›</button></div>';
+  html += '<div class="stat-grid" style="margin-bottom:12px">' +
+    '<div class="stat"><div class="v">' + fmt$(mAgg.spendTotal) + '</div><div class="l">Spent</div>' +
+    '<div class="tiny">Income ' + fmt$(mAgg.incomeTotal) + '</div></div>' +
+    (anyBudget
+      ? '<div class="stat"><div class="v"' + (left < 0 ? ' style="color:var(--status-crit)"' : '') + '>' + fmt$(left) + '</div>' +
+        '<div class="l">Budget left</div><div class="tiny">of ' + fmt$(totalBudget) + '</div></div>'
+      : '<div class="stat" data-x="setb" style="cursor:pointer"><div class="v">→</div><div class="l">Set budgets</div>' +
+        '<div class="tiny">Baseline & budgets</div></div>') + '</div>';
+  if (rq.length){
+    html += '<div class="card banner-review" data-x="rev"><div class="row"><span style="font-size:20px">🧾</span>' +
+      '<div class="grow"><b>' + rq.length + '</b> transaction' + (rq.length > 1 ? 's' : '') + ' need review' +
+      '<div class="tiny">' + fmt$(rqOut) + ' not yet sorted</div></div><span class="menu-chev">›</span></div></div>';
+  }
+  const rows = [];
+  for (const cat of liveCats()){
+    if ((cat.kind || 'expense') !== 'expense') continue;
+    const spent = mAgg.spend[cat.id] || 0;
+    const b = budgetFor(cat.id, baseline);
+    if (spent <= 0 && !b) continue;
+    rows.push({ cat, spent, b });
+  }
+  rows.sort((x, y) => y.spent - x.spent);
+  const top = rows.slice(0, 10);
+  if (top.length){
+    html += '<div class="card"><h3>' + fmtMonth(UI.month) + ' by category</h3>';
+    for (const r of top){
+      let bar;
+      if (r.b){
+        const pct = r.b.amt > 0 ? r.spent / r.b.amt : 0;
+        const cls = pct > 1.05 ? 'over' : pct >= 0.85 ? 'warn' : '';
+        bar = '<div class="progress"><i class="' + cls + '" style="width:' + Math.min(100, Math.round(pct * 100)) + '%"></i></div>';
+      } else bar = '<div class="progress"><i style="width:0"></i></div>';
+      html += '<div class="list-item" data-cat="' + esc(r.cat.id) + '"><span class="ic">' + esc(r.cat.icon || '•') + '</span>' +
+        '<div class="body"><div class="t1">' + esc(r.cat.name) + '</div>' + bar + '</div>' +
+        '<span class="amt">' + fmt$(r.spent) + (r.b ? '<span class="tiny"> / ' + fmt$(r.b.amt) + '</span>' : '') + '</span></div>';
+    }
+    if (mAgg.spend.__uncat > 0){
+      html += '<div class="list-item" data-x="unc"><span class="ic">❓</span><div class="body"><div class="t1">Uncategorized</div>' +
+        '<div class="t2">Tap to review</div></div><span class="amt">' + fmt$(mAgg.spend.__uncat) + '</span></div>';
+    }
+    html += '<button class="btn btn-sm btn-block" data-x="allb" style="margin-top:8px">All budgets →</button></div>';
+  }
+  let hs = 0;
+  for (const cat of liveCats()) if (cat.group === 'g-house') hs += mAgg.spend[cat.id] || 0;
+  if (hs > 0)
+    html += '<div class="card"><div class="row"><span style="font-size:18px">🏠</span>' +
+      '<div class="grow muted">House setup this month: <b style="color:var(--text)">' + fmt$(hs) + '</b>' +
+      '<div class="tiny">Kept out of your natural-budget baseline</div></div></div></div>';
+  const recent = all.filter((t) => t.status !== 'excluded')
+    .sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0)).slice(0, 6);
+  html += '<div class="card"><h3>Recent activity</h3>' + recent.map((t) => txnRowHTML(t)).join('') +
+    '<button class="btn btn-sm btn-block" data-x="alla" style="margin-top:8px">All activity →</button></div>';
+  html += '<button class="btn btn-primary btn-block" data-x="import" style="margin-bottom:16px">📥 Import statements</button>';
+  c.innerHTML = html;
+
+  c.querySelector('[data-x=prev]').onclick = () => { UI.month = shiftYM(UI.month, -1); renderHome(); };
+  c.querySelector('[data-x=next]').onclick = () => { UI.month = shiftYM(UI.month, 1); renderHome(); };
+  const on = (sel, fn) => { const n2 = c.querySelector(sel); if (n2) n2.onclick = fn; };
+  on('[data-x=rev]', () => showTab('review'));
+  on('[data-x=unc]', () => showTab('review'));
+  on('[data-x=setb]', () => openScreen('Budgets & Baseline', renderBudgetsScreen));
+  on('[data-x=allb]', () => openScreen('Budgets & Baseline', renderBudgetsScreen));
+  on('[data-x=alla]', () => showTab('activity'));
+  on('[data-x=import]', () => openScreen('Import', renderImportScreen));
+  c.querySelectorAll('[data-txn]').forEach((n2) => { n2.onclick = () => openTxnEditor(n2.dataset.txn); });
+  c.querySelectorAll('.list-item[data-cat]').forEach((n2) => {
+    n2.onclick = () => { ACT.cat = n2.dataset.cat; ACT.month = UI.month; showTab('activity'); };
+  });
+}
+/* ---- §Review ---- */
+function renderReview(){
+  const c = $('#view-review');
+  const queue = reviewTxns();
+  if (!queue.length){
+    REVIEW_SKIP.clear();
+    c.innerHTML = '<div class="empty">🎉 All caught up — nothing to review.</div>';
+    return;
+  }
+  let fresh = queue.filter((t) => !REVIEW_SKIP.has(t.id));
+  if (!fresh.length){ REVIEW_SKIP.clear(); fresh = queue; }
+  const t = fresh[0];
+  let sugg = suggestCats(t.m).slice(0, 4);
+  if (!sugg.length) sugg = ['food-gro', 'food-rest', 'sh-house', 'sh-fun'];
+  const html =
+    '<div class="row" style="margin-bottom:10px"><span class="chip">' + queue.length + ' left</span>' +
+    '<div class="grow"></div><button class="btn btn-sm" data-x="skip">Skip ›</button></div>' +
+    '<div class="card review-card">' +
+      '<div class="r-amt">' + fmt$(t.amt, { signed: t.amt > 0 }) + '</div>' +
+      '<div class="r-m">' + esc(t.m) + '</div>' +
+      '<div class="tiny" style="overflow-wrap:anywhere">' + esc(t.mraw) + '</div>' +
+      '<div class="muted" style="margin-bottom:14px">' + fmtDate(t.date) + ' · ' + esc(accountName(t.acct)) + '</div>' +
+      '<label class="row" style="justify-content:center;margin-bottom:10px"><input type="checkbox" data-x="always" checked style="width:auto"> ' +
+      '<span class="muted">Always: “' + esc(t.m) + '” → my pick</span></label>' +
+      '<div class="cat-grid" style="text-align:left">' + sugg.map((id) => catBtnHTML(id)).join('') +
+      '<button class="cat-btn" data-x="more">▦ More…</button></div>' +
+      '<div class="row" style="margin-top:12px">' +
+        '<button class="btn btn-sm grow" data-x="split">Split…</button>' +
+        '<button class="btn btn-sm grow" data-x="transfer">Transfer</button>' +
+        '<button class="btn btn-sm grow" data-x="excl">Exclude</button>' +
+      '</div>' +
+    '</div>' +
+    '<p class="muted" style="text-align:center">Tip: you answer once per merchant — rules handle the rest.<br>' +
+    '<a data-x="claude" style="cursor:pointer">Bulk triage with Claude →</a></p>';
+  c.innerHTML = html;
+  const q = (s) => c.querySelector(s);
+  function choose(cat){
+    if (q('[data-x=always]').checked){
+      createRule(t.m, cat);
+      t.cat = cat; t.status = 'ok'; put('txns', t);
+      const n = reapplyRules();
+      if (n) toast('+' + n + ' more auto-sorted');
+    } else {
+      t.cat = cat; t.status = 'ok'; put('txns', t);
+    }
+    renderCurrent();
+  }
+  c.querySelectorAll('[data-cat]').forEach((b) => { b.onclick = () => choose(b.dataset.cat); });
+  q('[data-x=more]').onclick = async () => {
+    const cat = await openCatPicker({ merchant: t.m, showSystem: true });
+    if (cat) choose(cat);
+  };
+  q('[data-x=skip]').onclick = () => { REVIEW_SKIP.add(t.id); renderReview(); };
+  q('[data-x=split]').onclick = () => openSplitEditor(t);
+  q('[data-x=transfer]').onclick = () => { t.cat = 'sys-transfer'; t.status = 'ok'; put('txns', t); renderCurrent(); };
+  q('[data-x=excl]').onclick = () => { t.status = 'excluded'; put('txns', t); renderCurrent(); };
+  q('[data-x=claude]').onclick = () => openScreen('Claude bulk triage', renderClaudeScreen);
+}
+
+/* ---- §Activity ---- */
+function actFiltered(){
+  const q = ACT.q.trim().toUpperCase();
+  return liveTxns().filter((t) => {
+    if (ACT.acct && t.acct !== ACT.acct) return false;
+    if (ACT.month && ymOf(t.date) !== ACT.month) return false;
+    if (ACT.cat){
+      if (!effParts(t).some((p) => (p.cat || '__uncat') === ACT.cat)) return false;
+    }
+    if (q && !(t.m.includes(q) || t.mraw.toUpperCase().includes(q) || (t.note || '').toUpperCase().includes(q))) return false;
+    return true;
+  }).sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0));
+}
+function renderActivity(){
+  const c = $('#view-activity');
+  const accts = liveAccounts();
+  const catName = ACT.cat ? (ACT.cat === '__uncat' ? 'Uncategorized' : catLabel(ACT.cat).name) : null;
+  let html =
+    '<input type="text" data-x="q" placeholder="Search merchants & notes…" value="' + esc(ACT.q) + '" style="margin-bottom:10px">' +
+    '<div class="filter-row">' +
+    '<span class="chip' + (ACT.acct ? ' on' : '') + '" data-x="facct">' +
+      (ACT.acct ? esc(accountName(ACT.acct)) + '<span class="tag-x">×</span>' : 'All accounts') + '</span>' +
+    '<span class="chip' + (ACT.cat ? ' on' : '') + '" data-x="fcat">' +
+      (catName ? esc(catName) + '<span class="tag-x">×</span>' : 'All categories') + '</span>' +
+    (ACT.month ? '<span class="chip on" data-x="fmprev">‹</span>' : '') +
+    '<span class="chip' + (ACT.month ? ' on' : '') + '" data-x="fmonth">' + (ACT.month ? fmtMonth(ACT.month) : 'All months') + '</span>' +
+    (ACT.month ? '<span class="chip on" data-x="fmnext">›</span>' : '') +
+    '<span class="chip' + (ACT.select ? ' on' : '') + '" data-x="fsel">' + (ACT.select ? 'Done' : 'Select') + '</span>' +
+    '</div><div data-x="list"></div>';
+  c.innerHTML = html;
+  const q = (s) => c.querySelector(s);
+
+  function drawList(){
+    const txns = actFiltered();
+    const shown = txns.slice(0, ACT.limit);
+    let lh = '', lastYM = null;
+    for (const t of shown){
+      const ym = ymOf(t.date);
+      if (ym !== lastYM){
+        lastYM = ym;
+        const mSpend = txns.reduce((s, x) => s + (ymOf(x.date) === ym && x.status !== 'excluded' && x.amt < 0 ? -x.amt : 0), 0);
+        lh += '<div class="group-label row"><span class="grow">' + fmtMonth(ym) + '</span><span>' + fmt$(mSpend) + ' out</span></div>';
+      }
+      lh += txnRowHTML(t, { select: ACT.select });
+    }
+    if (!shown.length) lh = '<div class="empty">No matching transactions.</div>';
+    if (txns.length > shown.length)
+      lh += '<button class="btn btn-block" data-x="morex">Show more (' + (txns.length - shown.length) + ' left)</button>';
+    if (ACT.select && ACT.sel.size)
+      lh += '<div class="act-bar"><span class="chip">' + ACT.sel.size + '</span>' +
+        '<button class="btn btn-sm" data-x="bcat">Categorize</button>' +
+        '<button class="btn btn-sm" data-x="bexc">Exclude</button>' +
+        '<button class="btn btn-sm btn-danger" data-x="bdel">Delete</button></div>';
+    q('[data-x=list]').innerHTML = lh;
+
+    q('[data-x=list]').querySelectorAll('[data-txn]').forEach((n2) => {
+      n2.onclick = () => {
+        const id = n2.dataset.txn;
+        if (ACT.select){
+          if (ACT.sel.has(id)) ACT.sel.delete(id); else ACT.sel.add(id);
+          drawList();
+        } else openTxnEditor(id);
+      };
+    });
+    const on = (sel, fn) => { const n2 = q(sel); if (n2) n2.onclick = fn; };
+    on('[data-x=morex]', () => { ACT.limit += 200; drawList(); });
+    on('[data-x=bcat]', async () => {
+      const cat = await openCatPicker({ showSystem: true });
+      if (!cat || cat === '__all' || cat === '__uncat') return;
+      for (const id of ACT.sel){
+        const t = DATA.txns[id];
+        if (!t || t.deleted) continue;
+        t.cat = cat; t.splits = null;
+        if (t.status === 'review') t.status = 'ok';
+        put('txns', t);
+      }
+      toast(ACT.sel.size + ' categorized');
+      ACT.sel.clear(); ACT.select = false; renderCurrent();
+    });
+    on('[data-x=bexc]', () => {
+      for (const id of ACT.sel){
+        const t = DATA.txns[id];
+        if (!t || t.deleted) continue;
+        t.status = 'excluded'; put('txns', t);
+      }
+      toast(ACT.sel.size + ' excluded');
+      ACT.sel.clear(); ACT.select = false; renderCurrent();
+    });
+    on('[data-x=bdel]', async () => {
+      if (!(await confirmDlg('Delete ' + ACT.sel.size + ' transactions? Re-imports will not bring them back.', 'Delete'))) return;
+      for (const id of ACT.sel) softDelete('txns', id);
+      toast(ACT.sel.size + ' deleted');
+      ACT.sel.clear(); ACT.select = false; renderCurrent();
+    });
+  }
+
+  let qTimer;
+  q('[data-x=q]').oninput = (e) => {
+    clearTimeout(qTimer);
+    qTimer = setTimeout(() => { ACT.q = e.target.value; ACT.limit = 200; drawList(); }, 200);
+  };
+  q('[data-x=facct]').onclick = () => {
+    if (ACT.acct) ACT.acct = null;
+    else if (accts.length){
+      ACT.acct = accts[0].id;
+    }
+    renderActivity(); return;
+  };
+  if (ACT.acct) q('[data-x=facct]').onclick = () => {
+    const i = accts.findIndex((a) => a.id === ACT.acct);
+    ACT.acct = (i >= 0 && i < accts.length - 1) ? accts[i + 1].id : null;
+    renderActivity();
+  };
+  q('[data-x=fcat]').onclick = async () => {
+    if (ACT.cat){ ACT.cat = null; renderActivity(); return; }
+    const cat = await openCatPicker({ showSystem: true, allowAll: true });
+    if (cat) ACT.cat = (cat === '__all') ? null : cat;
+    renderActivity();
+  };
+  q('[data-x=fmonth]').onclick = () => { ACT.month = ACT.month ? null : (UI.month || currentYM()); renderActivity(); };
+  const fp = q('[data-x=fmprev]'), fn2 = q('[data-x=fmnext]');
+  if (fp) fp.onclick = () => { ACT.month = shiftYM(ACT.month, -1); renderActivity(); };
+  if (fn2) fn2.onclick = () => { ACT.month = shiftYM(ACT.month, 1); renderActivity(); };
+  q('[data-x=fsel]').onclick = () => { ACT.select = !ACT.select; if (!ACT.select) ACT.sel.clear(); renderActivity(); };
+  drawList();
+}
+/* ---- §Trends ---- */
+function barPath(x, yTop, w, hgt, color, opacity){
+  if (hgt <= 0.5) return '';
+  const r = Math.min(3, w / 2, hgt);
+  return '<path d="M' + x.toFixed(1) + ',' + (yTop + hgt).toFixed(1) +
+    ' L' + x.toFixed(1) + ',' + (yTop + r).toFixed(1) +
+    ' Q' + x.toFixed(1) + ',' + yTop.toFixed(1) + ' ' + (x + r).toFixed(1) + ',' + yTop.toFixed(1) +
+    ' L' + (x + w - r).toFixed(1) + ',' + yTop.toFixed(1) +
+    ' Q' + (x + w).toFixed(1) + ',' + yTop.toFixed(1) + ' ' + (x + w).toFixed(1) + ',' + (yTop + r).toFixed(1) +
+    ' L' + (x + w).toFixed(1) + ',' + (yTop + hgt).toFixed(1) + ' Z" fill="' + color + '" opacity="' + opacity + '"/>';
+}
+function renderTrends(){
+  const c = $('#view-trends');
+  const agg = buildMonthAgg();
+  const months = Object.keys(agg).sort().slice(-12);
+  if (!months.length){
+    c.innerHTML = '<div class="empty">Import statements first — trends appear here.</div>';
+    return;
+  }
+  if (!TRENDS_SEL.month || !months.includes(TRENDS_SEL.month)) TRENDS_SEL.month = months[months.length - 1];
+  const sel = TRENDS_SEL.month;
+  const si = months.indexOf(sel);
+  const n = months.length;
+  const baseline = baselineByCat(agg);
+  const padT = 16, padB = 22, padL = 6, padR = 6;
+
+  /* -- card 1: spending vs income, grouped bars -- */
+  const W1 = Math.max(340, n * 42), H1 = 180;
+  let maxV = 1;
+  for (const ym of months) maxV = Math.max(maxV, agg[ym].spendTotal, agg[ym].incomeTotal);
+  if (baseline) maxV = Math.max(maxV, baseline.total);
+  const colW = (W1 - padL - padR) / n;
+  const yS = (v) => padT + (1 - v / maxV) * (H1 - padT - padB);
+  let s1 = '';
+  for (let gi = 1; gi <= 3; gi++){
+    const gy = yS(maxV * gi / 4).toFixed(1);
+    s1 += '<line x1="' + padL + '" y1="' + gy + '" x2="' + (W1 - padR) + '" y2="' + gy + '" stroke="var(--line)"/>';
+  }
+  const barW = Math.max(4, Math.min(13, (colW - 10) / 2));
+  months.forEach((ym, i) => {
+    const cx = padL + i * colW + colW / 2;
+    const op = ym === sel ? '1' : '0.72';
+    const spTop = yS(agg[ym].spendTotal), inTop = yS(agg[ym].incomeTotal);
+    s1 += barPath(cx - barW - 1, spTop, barW, H1 - padB - spTop, 'var(--viz-1)', op);
+    s1 += barPath(cx + 1, inTop, barW, H1 - padB - inTop, 'var(--viz-2)', op);
+    if (n <= 8 || i % 2 === 0 || ym === sel)
+      s1 += '<text x="' + cx.toFixed(1) + '" y="' + (H1 - 6) + '" text-anchor="middle" font-size="10" fill="var(--faint)">' + fmtMonth(ym).slice(0, 3) + '</text>';
+    if (ym === sel)
+      s1 += '<rect x="' + (cx - colW / 2 + 3).toFixed(1) + '" y="' + (H1 - padB + 3) + '" width="' + (colW - 6).toFixed(1) + '" height="2" rx="1" fill="var(--accent)"/>';
+    s1 += '<rect data-m="' + ym + '" x="' + (padL + i * colW).toFixed(1) + '" y="0" width="' + colW.toFixed(1) + '" height="' + H1 + '" fill="transparent" style="cursor:pointer"/>';
+  });
+  if (baseline){
+    const by = yS(baseline.total).toFixed(1);
+    s1 += '<line x1="' + padL + '" y1="' + by + '" x2="' + (W1 - padR) + '" y2="' + by + '" stroke="var(--faint)" stroke-dasharray="4 3"/>' +
+      '<text x="' + (W1 - padR) + '" y="' + (yS(baseline.total) - 4).toFixed(1) + '" text-anchor="end" font-size="9" fill="var(--faint)">baseline</text>';
+  }
+  const sA = agg[sel];
+  const net = sA.incomeTotal - sA.spendTotal;
+  const card1 =
+    '<div class="card"><h3>Spending vs income</h3>' +
+    '<div class="chart-wrap"><svg viewBox="0 0 ' + W1 + ' ' + H1 + '" width="100%" xmlns="http://www.w3.org/2000/svg">' + s1 + '</svg></div>' +
+    '<div class="legend"><span><i style="background:var(--viz-1)"></i>Spending</span><span><i style="background:var(--viz-2)"></i>Income</span></div>' +
+    '<div class="chart-caption">' + fmtMonth(sel) + ' — Spent ' + fmt$(sA.spendTotal) + ' · Income ' + fmt$(sA.incomeTotal) +
+    ' · Net <b style="color:' + (net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(net, { signed: true }) + '</b></div></div>';
+
+  /* -- card 2: where it goes, top-4 category lines + Other -- */
+  const totals = {};
+  for (const ym of months) for (const cid in agg[ym].spend) totals[cid] = (totals[cid] || 0) + agg[ym].spend[cid];
+  const ranked = Object.keys(totals).filter((k) => totals[k] > 0).sort((a, b) => totals[b] - totals[a]);
+  const topIds = ranked.slice(0, 4);
+  const series = topIds.map((cid, k) => ({
+    name: cid === '__uncat' ? 'Uncategorized' : catLabel(cid).name,
+    color: 'var(--viz-' + (k + 1) + ')',
+    vals: months.map((ym) => agg[ym].spend[cid] || 0),
+  }));
+  if (ranked.length > 4) series.push({
+    name: 'Other', color: 'var(--viz-other)',
+    vals: months.map((ym) => ranked.slice(4).reduce((s, cid) => s + (agg[ym].spend[cid] || 0), 0)),
+  });
+  let card2 = '';
+  if (series.length){
+    const GUT = 84;
+    const W2 = Math.max(340, n * 40) + GUT, H2 = 180;
+    const plotR = W2 - GUT;
+    const colW2 = (plotR - padL) / n;
+    let sMax = 1;
+    for (const se of series) for (const v of se.vals) sMax = Math.max(sMax, v);
+    const yL = (v) => padT + (1 - v / sMax) * (H2 - padT - padB);
+    const xL = (i) => padL + i * colW2 + colW2 / 2;
+    let s2 = '';
+    for (let gi = 1; gi <= 3; gi++){
+      const gy = yL(sMax * gi / 4).toFixed(1);
+      s2 += '<line x1="' + padL + '" y1="' + gy + '" x2="' + plotR + '" y2="' + gy + '" stroke="var(--line)"/>';
+    }
+    for (const se of series){
+      s2 += '<polyline points="' + se.vals.map((v, i) => xL(i).toFixed(1) + ',' + yL(v).toFixed(1)).join(' ') +
+        '" fill="none" stroke="' + se.color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+      s2 += '<circle cx="' + xL(si).toFixed(1) + '" cy="' + yL(se.vals[si]).toFixed(1) + '" r="4" fill="' + se.color + '" stroke="var(--card)" stroke-width="2"/>';
+    }
+    const labels = series.map((se) => ({ name: se.name, color: se.color, y: yL(se.vals[n - 1]) }))
+      .sort((a, b) => a.y - b.y);
+    for (let i = 1; i < labels.length; i++) if (labels[i].y < labels[i - 1].y + 11) labels[i].y = labels[i - 1].y + 11;
+    for (const lb of labels)
+      s2 += '<circle cx="' + (plotR + 7) + '" cy="' + (lb.y - 3).toFixed(1) + '" r="3" fill="' + lb.color + '"/>' +
+        '<text x="' + (plotR + 14) + '" y="' + lb.y.toFixed(1) + '" font-size="10" fill="var(--dim)">' + esc(lb.name.slice(0, 12)) + '</text>';
+    months.forEach((ym, i) => {
+      if (n <= 8 || i % 2 === 0 || ym === sel)
+        s2 += '<text x="' + xL(i).toFixed(1) + '" y="' + (H2 - 6) + '" text-anchor="middle" font-size="10" fill="var(--faint)">' + fmtMonth(ym).slice(0, 3) + '</text>';
+      s2 += '<rect data-m="' + ym + '" x="' + (padL + i * colW2).toFixed(1) + '" y="0" width="' + colW2.toFixed(1) + '" height="' + H2 + '" fill="transparent" style="cursor:pointer"/>';
+    });
+    card2 = '<div class="card"><h3>Where it goes</h3>' +
+      '<div class="chart-wrap"><svg viewBox="0 0 ' + W2 + ' ' + H2 + '" width="100%" xmlns="http://www.w3.org/2000/svg">' + s2 + '</svg></div>' +
+      '<div class="legend">' + series.map((se) => '<span><i style="background:' + se.color + '"></i>' + esc(se.name) + '</span>').join('') + '</div>' +
+      '<div class="chart-caption">' + fmtMonth(sel) + ' — ' + series.map((se) => esc(se.name) + ' ' + fmt$(se.vals[si])).join(' · ') + '</div></div>';
+  }
+
+  /* -- card 3: vs baseline table -- */
+  let card3;
+  if (baseline){
+    const rows3 = [];
+    for (const cat of liveCats()){
+      if ((cat.kind || 'expense') !== 'expense') continue;
+      const spent = sA.spend[cat.id] || 0;
+      const base = baseline.cats[cat.id] || 0;
+      if (!spent && !base) continue;
+      rows3.push({ name: cat.name, icon: cat.icon, spent, base });
+    }
+    rows3.sort((a, b) => b.spent - a.spent);
+    const tS = rows3.reduce((s, r) => s + r.spent, 0), tB = rows3.reduce((s, r) => s + r.base, 0);
+    const dCell = (spent, base) => {
+      if (!base) return '<td class="muted" style="text-align:right">—</td>';
+      const d = spent - base;
+      const col = spent > base * 1.05 ? 'var(--status-crit)' : spent < base ? 'var(--status-good)' : 'var(--dim)';
+      return '<td style="text-align:right;color:' + col + '">' + fmt$(d, { signed: true }) + '</td>';
+    };
+    card3 = '<div class="card"><h3>' + fmtMonth(sel) + ' vs your baseline</h3><div class="tbl-wrap"><table class="map-tbl">' +
+      '<tr><th>Category</th><th style="text-align:right">Month</th><th style="text-align:right">Baseline</th><th style="text-align:right">Δ</th></tr>' +
+      rows3.map((r) => '<tr><td>' + esc(r.icon || '') + ' ' + esc(r.name) + '</td>' +
+        '<td style="text-align:right">' + fmt$(r.spent) + '</td>' +
+        '<td style="text-align:right" class="muted">' + (r.base ? fmt$(r.base) : '—') + '</td>' + dCell(r.spent, r.base) + '</tr>').join('') +
+      '<tr><td><b>Total</b></td><td style="text-align:right"><b>' + fmt$(tS) + '</b></td>' +
+      '<td style="text-align:right"><b>' + fmt$(tB) + '</b></td>' + dCell(tS, tB) + '</tr></table></div>' +
+      '<div class="tiny" style="margin-top:6px">Baseline = your typical month, ' + fmtMonth(settings().baselineFrom) + '–' + fmtMonth(settings().baselineTo) + ' (House Setup excluded)</div></div>';
+  } else {
+    card3 = '<div class="card"><h3>Natural budget</h3><p class="muted" style="margin:0">Set your baseline window in ' +
+      '<a data-x="gob" style="cursor:pointer">Budgets &amp; Baseline</a> to compare every month against how you naturally spend.</p></div>';
+  }
+
+  /* -- card 4: recurring teaser -- */
+  const rec = detectRecurring();
+  let card4 = '<div class="card"><h3>Recurring</h3>';
+  if (rec.length){
+    const recTotal = rec.reduce((s, r) => s + r.monthly, 0);
+    card4 += '<p class="muted" style="margin:0 0 6px">' + fmt$(recTotal) + '/mo across ' + rec.length + ' recurring charges</p>' +
+      rec.slice(0, 3).map((r) => '<div class="list-item"><span class="ic">' + catLabel(r.cat).icon + '</span>' +
+        '<div class="body"><div class="t1">' + esc(r.merchant) + '</div><div class="t2">' + r.period + ' · last ' + fmtDate(r.last) + '</div></div>' +
+        '<span class="amt">' + fmt$(r.monthly) + '/mo</span></div>').join('') +
+      '<button class="btn btn-sm btn-block" data-x="allrec" style="margin-top:8px">All recurring →</button>';
+  } else card4 += '<p class="muted" style="margin:0">No recurring charges detected yet — needs 3+ sightings of a merchant.</p>';
+  card4 += '</div>';
+
+  c.innerHTML = card1 + card2 + card3 + card4;
+  c.querySelectorAll('[data-m]').forEach((r2) => {
+    r2.onclick = () => { TRENDS_SEL.month = r2.dataset.m; renderTrends(); };
+  });
+  const gob = c.querySelector('[data-x=gob]');
+  if (gob) gob.onclick = () => openScreen('Budgets & Baseline', renderBudgetsScreen);
+  const ar = c.querySelector('[data-x=allrec]');
+  if (ar) ar.onclick = () => openScreen('Recurring', renderRecurringScreen);
+}
+/* ---- §More ---- */
+function renderMore(){
+  const c = $('#view-more');
+  if (MORE_STACK.length){
+    const top2 = MORE_STACK[MORE_STACK.length - 1];
+    c.innerHTML = '<div class="screen-head"><button class="back-btn" data-x="back">‹</button><h2>' + esc(top2.title) + '</h2></div><div data-x="sbody"></div>';
+    c.querySelector('[data-x=back]').onclick = () => popScreen();
+    top2.render(c.querySelector('[data-x=sbody]'));
+    return;
+  }
+  const items = [
+    ['📥', 'Import statements', 'CSV from your bank / card', () => openScreen('Import', renderImportScreen)],
+    ['🎯', 'Budgets & Baseline', 'Natural budget + overrides', () => openScreen('Budgets & Baseline', renderBudgetsScreen)],
+    ['🔁', 'Recurring', 'Subscriptions & repeat bills', () => openScreen('Recurring', renderRecurringScreen)],
+    ['🏷️', 'Categories & Rules', 'Edit the sorting brain', () => openScreen('Categories & Rules', renderCatsScreen)],
+    ['🏦', 'Accounts', 'Banks & cards', () => openScreen('Accounts', renderAccountsScreen)],
+    ['🤖', 'Claude bulk triage', 'Sort many merchants at once', () => openScreen('Claude bulk triage', renderClaudeScreen)],
+    ['☁️', 'Sync', 'Status: ' + SYNC.status, () => openScreen('Sync', renderSyncScreen)],
+    ['💾', 'Backup', 'Export / import everything', () => openScreen('Backup', renderBackupScreen)],
+  ];
+  c.innerHTML = '<div class="card">' + items.map((it, i) =>
+    '<div class="list-item" data-mi="' + i + '"><span class="ic">' + it[0] + '</span><div class="body"><div class="t1">' + it[1] +
+    '</div><div class="t2">' + esc(it[2]) + '</div></div><span class="menu-chev">›</span></div>').join('') + '</div>' +
+    '<p class="tiny" style="text-align:center">Nest v1 — local-first · E2E-encrypted sync</p>';
+  c.querySelectorAll('[data-mi]').forEach((n2) => { n2.onclick = () => items[+n2.dataset.mi][3](); });
+}
+
+/* ---- Import screen ---- */
+function renderImportScreen(c){
+  c.innerHTML =
+    '<div class="drop" data-x="dz">📥 Drop bank CSV files here<br><span class="tiny">or tap to choose</span></div>' +
+    '<p class="muted">Download CSV/spreadsheet exports from your bank or card site — Chase, Amex, Capital One, Citi, Discover, BofA and Apple Card are auto-detected; anything else gets a column picker.</p>' +
+    '<p class="muted">📄 Only have PDF statements? Ask Claude: “convert these statements to CSV with date, description, amount columns”, then import the result here.</p>' +
+    '<p class="tiny">Re-importing an overlapping statement is always safe — duplicates are skipped automatically.</p>';
+  const dz = c.querySelector('[data-x=dz]');
+  const fi = $('#file-input');
+  dz.onclick = () => fi.click();
+  fi.onchange = () => { const fl = fi.files; fi.value = ''; if (fl && fl.length) runImportFlow(Array.from(fl)); };
+  dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('over'); };
+  dz.ondragleave = () => dz.classList.remove('over');
+  dz.ondrop = (e) => { e.preventDefault(); dz.classList.remove('over'); runImportFlow(e.dataTransfer.files); };
+}
+
+/* ---- Budgets & Baseline screen ---- */
+function renderBudgetsScreen(c){
+  const agg = buildMonthAgg();
+  const s = settings();
+  const baseline = baselineByCat(agg);
+  let html = '<div class="card"><h3>Baseline window — your “natural” months</h3>' +
+    '<div class="row"><label class="fld grow"><span>From</span><input type="month" data-x="bfrom" value="' + esc(s.baselineFrom || '') + '"></label>' +
+    '<label class="fld grow"><span>To</span><input type="month" data-x="bto" value="' + esc(s.baselineTo || '') + '"></label></div>' +
+    '<p class="muted" style="margin:0">Pick pre-move months that reflect normal life. Natural budget = your typical month across that window (House Setup excluded).' +
+    (baseline ? ' <b style="color:var(--text)">Baseline: ' + fmt$(baseline.total) + '/mo across ' + baseline.months + ' month' + (baseline.months > 1 ? 's' : '') + ' of data.</b>' : '') +
+    '</p></div>';
+  html += '<div class="card"><h3>Monthly budgets</h3><p class="tiny" style="margin:0 0 8px">Blank = use baseline automatically. Enter dollars to override.</p>';
+  let total = 0;
+  for (const g of GROUPS){
+    if (g.kind === 'income' || g.kind === 'system') continue;
+    const cats = liveCats().filter((cat) => cat.group === g.id && (cat.kind || 'expense') === 'expense');
+    if (!cats.length) continue;
+    html += '<div class="group-label">' + esc(g.name) + (g.excludeFromBaseline ? ' · not in baseline' : '') + '</div>';
+    for (const cat of cats){
+      const b = DATA.budgets[cat.id];
+      const explicit = (b && !b.deleted && b.amt > 0) ? b.amt : null;
+      const bf = budgetFor(cat.id, baseline);
+      if (bf) total += bf.amt;
+      const baseTxt = baseline && baseline.cats[cat.id] ? fmt$(baseline.cats[cat.id]) : '—';
+      html += '<div class="list-item" style="cursor:default"><span class="ic">' + esc(cat.icon || '•') + '</span>' +
+        '<div class="body"><div class="t1">' + esc(cat.name) + '</div><div class="t2">baseline ' + baseTxt + '</div></div>' +
+        '<input class="budget-in" type="number" min="0" step="1" inputmode="decimal" data-bcat="' + esc(cat.id) + '"' +
+        ' value="' + (explicit != null ? (explicit / 100) : '') + '"' +
+        ' placeholder="' + (baseline && baseline.cats[cat.id] ? Math.round(baseline.cats[cat.id] / 100) : '·') + '"></div>';
+    }
+  }
+  html += '<div class="row" style="margin-top:10px"><div class="grow"><b>Total monthly budget</b></div><b>' + fmt$(total) + '</b></div></div>';
+  c.innerHTML = html;
+  const q = (sel2) => c.querySelector(sel2);
+  const setYM = (key) => (e) => {
+    const v = e.target.value;
+    if (!v || /^\d{4}-\d{2}$/.test(v)){
+      const patch = {}; patch[key] = v;
+      saveSettings(patch);
+      renderBudgetsScreen(c);
+    }
+  };
+  q('[data-x=bfrom]').onchange = setYM('baselineFrom');
+  q('[data-x=bto]').onchange = setYM('baselineTo');
+  c.querySelectorAll('[data-bcat]').forEach((inp) => {
+    inp.onchange = () => {
+      const catId = inp.dataset.bcat;
+      const cents = parseAmountCents(inp.value);
+      if (cents && cents > 0) put('budgets', { id: catId, amt: cents });
+      else if (DATA.budgets[catId]) softDelete('budgets', catId);
+      renderBudgetsScreen(c);
+    };
+  });
+}
+
+/* ---- Recurring screen ---- */
+function renderRecurringScreen(c){
+  const rec = detectRecurring();
+  if (!rec.length){
+    c.innerHTML = '<div class="empty">Nothing recurring detected yet.<br><span class="tiny">Needs 3+ charges from the same merchant on a steady cadence.</span></div>';
+    return;
+  }
+  const total = rec.reduce((s, r) => s + r.monthly, 0);
+  c.innerHTML = '<div class="stat" style="margin-bottom:12px"><div class="v">' + fmt$(total) + '/mo</div>' +
+    '<div class="l">' + rec.length + ' recurring charges</div></div>' +
+    '<div class="card">' + rec.map((r) =>
+      '<div class="list-item" style="cursor:default"><span class="ic">' + catLabel(r.cat).icon + '</span>' +
+      '<div class="body"><div class="t1">' + esc(r.merchant) + '</div>' +
+      '<div class="t2">' + r.period + ' ' + fmt$(r.amt) + ' · seen ' + r.count + '× · last ' + fmtDate(r.last) + ' · ' + esc(catLabel(r.cat).name) + '</div></div>' +
+      '<span class="amt">' + fmt$(r.monthly) + '/mo</span></div>').join('') + '</div>';
+}
+
+/* ---- Categories & Rules screen ---- */
+function renderCatsScreen(c){
+  let html = '<div class="card"><h3>Categories</h3>';
+  for (const g of GROUPS){
+    const cats = liveCats().filter((cat) => cat.group === g.id);
+    html += '<div class="group-label row"><span class="grow">' + esc(g.name) + '</span>' +
+      (g.kind === 'system' ? '' : '<a data-gadd="' + g.id + '" style="cursor:pointer">＋ add</a>') + '</div>';
+    for (const cat of cats)
+      html += '<div class="list-item" data-cid="' + esc(cat.id) + '"><span class="ic">' + esc(cat.icon || '•') + '</span>' +
+        '<div class="body"><div class="t1">' + esc(cat.name) + '</div></div><span class="menu-chev">›</span></div>';
+  }
+  html += '</div>';
+  const rules = liveRules().sort((a, b) => (a.pattern < b.pattern ? -1 : 1));
+  html += '<div class="card"><h3>Rules (' + rules.length + ')</h3>' +
+    (rules.length ? '' : '<p class="muted" style="margin:0 0 8px">Rules auto-categorize imports: “merchant contains X → category”.</p>') +
+    rules.map((r) => '<div class="list-item" style="cursor:default"><div class="body">' +
+      '<span class="rule-pat">' + esc(r.pattern) + '</span> <span class="tiny">' + r.type + '</span>' +
+      '<div class="t2">→ ' + esc(catLabel(r.cat).name) + '</div></div>' +
+      '<button class="btn btn-sm" data-rdel="' + esc(r.id) + '">×</button></div>').join('') +
+    '<button class="btn btn-sm btn-block" data-x="radd" style="margin-top:8px">＋ Add rule</button></div>';
+  c.innerHTML = html;
+
+  c.querySelectorAll('[data-gadd]').forEach((a2) => {
+    a2.onclick = () => {
+      const gid = a2.dataset.gadd;
+      const m = modal('New category',
+        '<label class="fld"><span>Name</span><input type="text" data-x="nm"></label>' +
+        '<label class="fld"><span>Icon (one emoji)</span><input type="text" data-x="ic" maxlength="4" placeholder="🧺"></label>' +
+        '<button class="btn btn-primary btn-block" data-x="sv">Add</button>');
+      m.node.querySelector('[data-x=sv]').onclick = () => {
+        const name = m.node.querySelector('[data-x=nm]').value.trim();
+        if (!name) return;
+        put('cats', { id: uid(), group: gid, name, icon: m.node.querySelector('[data-x=ic]').value.trim() || '•',
+          kind: gid === 'g-inc' ? 'income' : 'expense' });
+        m.close(); renderCatsScreen(c); toast('Category added');
+      };
+    };
+  });
+  c.querySelectorAll('[data-cid]').forEach((n2) => {
+    n2.onclick = () => {
+      const cat = DATA.cats[n2.dataset.cid];
+      if (!cat) return;
+      const m = modal('Edit category',
+        '<label class="fld"><span>Name</span><input type="text" data-x="nm" value="' + esc(cat.name) + '"></label>' +
+        '<label class="fld"><span>Icon</span><input type="text" data-x="ic" maxlength="4" value="' + esc(cat.icon || '') + '"></label>' +
+        '<div class="row"><button class="btn grow" data-x="sv">Save</button>' +
+        '<button class="btn btn-danger grow" data-x="ar">Archive</button></div>');
+      m.node.querySelector('[data-x=sv]').onclick = () => {
+        const name = m.node.querySelector('[data-x=nm]').value.trim();
+        if (!name) return;
+        cat.name = name; cat.icon = m.node.querySelector('[data-x=ic]').value.trim() || '•';
+        put('cats', cat); m.close(); renderCatsScreen(c);
+      };
+      m.node.querySelector('[data-x=ar]').onclick = async () => {
+        if (!(await confirmDlg('Archive “' + cat.name + '”? Existing transactions keep it; it just leaves the pickers.', 'Archive'))) return;
+        softDelete('cats', cat.id); m.close(); renderCatsScreen(c);
+      };
+    };
+  });
+  c.querySelectorAll('[data-rdel]').forEach((b) => {
+    b.onclick = () => { softDelete('rules', b.dataset.rdel); renderCatsScreen(c); toast('Rule removed'); };
+  });
+  c.querySelector('[data-x=radd]').onclick = () => {
+    let ruleCat = null, ruleType = 'contains';
+    const m = modal('New rule',
+      '<label class="fld"><span>When merchant contains…</span><input type="text" data-x="pat" placeholder="COSTCO"></label>' +
+      '<div class="seg" style="margin-bottom:10px"><button data-x="t1" class="on">Contains</button><button data-x="t2">Exact</button></div>' +
+      '<button class="btn btn-block" data-x="pc" style="margin-bottom:10px">Category: tap to pick</button>' +
+      '<button class="btn btn-primary btn-block" data-x="sv" disabled>Add rule</button>');
+    const q2 = (s2) => m.node.querySelector(s2);
+    const upd = () => { q2('[data-x=sv]').disabled = !(ruleCat && q2('[data-x=pat]').value.trim()); };
+    q2('[data-x=pat]').oninput = upd;
+    q2('[data-x=t1]').onclick = () => { ruleType = 'contains'; q2('[data-x=t1]').classList.add('on'); q2('[data-x=t2]').classList.remove('on'); };
+    q2('[data-x=t2]').onclick = () => { ruleType = 'exact'; q2('[data-x=t2]').classList.add('on'); q2('[data-x=t1]').classList.remove('on'); };
+    q2('[data-x=pc]').onclick = async () => {
+      const cat = await openCatPicker({ showSystem: true });
+      if (cat){ ruleCat = cat; q2('[data-x=pc]').textContent = 'Category: ' + catLabel(cat).name; upd(); }
+    };
+    q2('[data-x=sv]').onclick = () => {
+      createRule(q2('[data-x=pat]').value, ruleCat, ruleType);
+      const n3 = reapplyRules();
+      m.close(); renderCatsScreen(c);
+      toast('Rule added' + (n3 ? ' · ' + n3 + ' auto-sorted' : ''));
+    };
+  };
+}
+
+/* ---- Accounts screen ---- */
+function renderAccountsScreen(c){
+  const counts = {};
+  for (const t of liveTxns()) counts[t.acct] = (counts[t.acct] || 0) + 1;
+  const accts = Object.values(DATA.accounts).filter((a) => !a.deleted);
+  c.innerHTML = '<div class="card"><h3>Accounts</h3>' +
+    (accts.length ? accts.map((a) =>
+      '<div class="list-item" data-aid="' + esc(a.id) + '"><span class="ic">' + (a.type === 'credit' ? '💳' : '🏦') + '</span>' +
+      '<div class="body"><div class="t1">' + esc(a.name) + (a.archived ? ' <span class="tiny">(archived)</span>' : '') + '</div>' +
+      '<div class="t2">' + esc(a.type || '') + ' · ' + (counts[a.id] || 0) + ' transactions</div></div><span class="menu-chev">›</span></div>').join('')
+      : '<p class="muted" style="margin:0">Accounts are created during import — or add one below.</p>') +
+    '</div><div class="card"><h3>Add account</h3><div class="row">' +
+    '<input type="text" data-x="nm" placeholder="e.g. Chase Sapphire" class="grow">' +
+    '<select data-x="ty" style="max-width:130px"><option value="credit">Credit card</option>' +
+    '<option value="checking">Checking</option><option value="savings">Savings</option></select>' +
+    '<button class="btn btn-sm" data-x="add">Add</button></div></div>';
+  c.querySelector('[data-x=add]').onclick = () => {
+    const name = c.querySelector('[data-x=nm]').value.trim();
+    if (!name) return;
+    put('accounts', { id: uid(), name, type: c.querySelector('[data-x=ty]').value });
+    renderAccountsScreen(c); toast('Account added');
+  };
+  c.querySelectorAll('[data-aid]').forEach((n2) => {
+    n2.onclick = () => {
+      const a = DATA.accounts[n2.dataset.aid];
+      if (!a) return;
+      const m = modal('Edit account',
+        '<label class="fld"><span>Name</span><input type="text" data-x="nm" value="' + esc(a.name) + '"></label>' +
+        '<label class="fld"><span>Type</span><select data-x="ty">' +
+        ['credit', 'checking', 'savings'].map((t2) => '<option value="' + t2 + '"' + (a.type === t2 ? ' selected' : '') + '>' + t2 + '</option>').join('') +
+        '</select></label><div class="row"><button class="btn grow" data-x="sv">Save</button>' +
+        '<button class="btn btn-danger grow" data-x="ar">' + (a.archived ? 'Unarchive' : 'Archive') + '</button></div>');
+      m.node.querySelector('[data-x=sv]').onclick = () => {
+        const name = m.node.querySelector('[data-x=nm]').value.trim();
+        if (!name) return;
+        a.name = name; a.type = m.node.querySelector('[data-x=ty]').value;
+        put('accounts', a); m.close(); renderAccountsScreen(c);
+      };
+      m.node.querySelector('[data-x=ar]').onclick = () => {
+        a.archived = !a.archived; put('accounts', a); m.close(); renderAccountsScreen(c);
+      };
+    };
+  });
+}
+
+/* ---- Claude triage screen ---- */
+function renderClaudeScreen(c){
+  const merchants = new Set(reviewTxns().map((t) => t.m)).size;
+  c.innerHTML =
+    '<div class="card"><h3>1 · Copy the digest</h3>' +
+    '<p class="muted" style="margin:0 0 10px">' + (merchants ? '<b style="color:var(--text)">' + merchants + '</b> merchants are waiting in review.' : 'Review queue is empty — nothing to triage.') +
+    ' The digest lists them with your category ids; paste it into any Claude chat.</p>' +
+    '<button class="btn btn-primary btn-block" data-x="copy"' + (merchants ? '' : ' disabled') + '>📋 Copy digest</button></div>' +
+    '<div class="card"><h3>2 · Paste Claude’s rules back</h3>' +
+    '<textarea data-x="paste" rows="5" placeholder=\'[{"pattern":"HOME DEPOT","cat":"hou-maint"}]\'></textarea>' +
+    '<button class="btn btn-primary btn-block" data-x="apply" style="margin-top:10px">Apply rules</button></div>';
+  c.querySelector('[data-x=copy]').onclick = async () => {
+    const ok = await copyText(exportReviewDigest());
+    toast(ok ? 'Digest copied — paste it to Claude' : 'Copy failed — try again');
+  };
+  c.querySelector('[data-x=apply]').onclick = () => {
+    const r = importRulesJSON(c.querySelector('[data-x=paste]').value);
+    if (r.error){ toast(r.error); return; }
+    toast(r.created + ' rules added · ' + r.resolved + ' transactions sorted');
+    renderClaudeScreen(c); updateReviewBadge();
+  };
+}
+
+/* ---- Sync screen ---- */
+function renderSyncScreen(c){
+  let html = '<div class="card"><h3>Status</h3><p style="margin:0">' +
+    (CRYPTO ? '🔒 Sync is ON — room <span class="rule-pat">' + CRYPTO.roomId.slice(0, 8) + '…</span> · ' + esc(SYNC.status)
+            : 'Sync is off — data lives only on this device.') + '</p>' +
+    '<p class="muted" style="margin:8px 0 0">End-to-end encrypted: the passphrase never leaves your devices — the server stores only ciphertext. ' +
+    'Use the <b>same passphrase on both phones</b> to share one ledger.</p></div>';
+  if (!CRYPTO){
+    html += '<div class="card"><h3>Enable sync</h3>' +
+      '<label class="fld"><span>Shared passphrase — min 8 chars, try 4 random words</span><input type="password" data-x="p1" autocomplete="off"></label>' +
+      '<label class="fld"><span>Repeat it</span><input type="password" data-x="p2" autocomplete="off"></label>' +
+      '<button class="btn btn-primary btn-block" data-x="en">Enable sync</button>' +
+      '<p class="tiny" style="margin:8px 0 0">Write it down — there is no reset. A lost passphrase = a new empty sync room.</p></div>';
+  } else {
+    html += '<div class="row" style="margin-bottom:10px"><button class="btn grow" data-x="now">Sync now</button>' +
+      '<button class="btn btn-danger grow" data-x="off">Disconnect</button></div>' +
+      '<p class="tiny">Disconnecting keeps everything on this device; it just stops syncing.</p>';
+  }
+  c.innerHTML = html;
+  const q = (s2) => c.querySelector(s2);
+  if (!CRYPTO){
+    q('[data-x=en]').onclick = async () => {
+      const p1 = q('[data-x=p1]').value, p2 = q('[data-x=p2]').value;
+      if (p1.length < 8){ toast('Passphrase must be at least 8 characters'); return; }
+      if (p1 !== p2){ toast('Passphrases don’t match'); return; }
+      const btn = q('[data-x=en]');
+      btn.disabled = true; btn.textContent = 'Setting up…';
+      try {
+        await enableSync(p1);
+        toast('Sync enabled 🔒');
+      } catch (e) { toast('Could not reach sync server — will retry automatically'); }
+      renderMore();
+    };
+  } else {
+    q('[data-x=now]').onclick = async () => {
+      const btn = q('[data-x=now]');
+      btn.disabled = true; btn.textContent = 'Syncing…';
+      await syncPush();
+      renderMore();
+      toast(SYNC.status === 'synced' ? 'Synced ✓' : 'Sync ' + SYNC.status);
+    };
+    q('[data-x=off]').onclick = async () => {
+      if (!(await confirmDlg('Turn off sync on this device? Local data stays.', 'Disconnect'))) return;
+      disableSync(); renderMore(); toast('Sync off');
+    };
+  }
+}
+
+/* ---- Backup screen ---- */
+function renderBackupScreen(c){
+  c.innerHTML =
+    '<div class="card"><h3>Export</h3><p class="muted" style="margin:0 0 10px">Plain-JSON snapshot of everything — keep it somewhere private.</p>' +
+    '<button class="btn btn-primary btn-block" data-x="ex">⬇️ Export backup file</button></div>' +
+    '<div class="card"><h3>Import</h3><p class="muted" style="margin:0 0 10px">Merge combines with what’s here (newest edit wins). Replace wipes this device first.</p>' +
+    '<div class="row"><button class="btn grow" data-x="im">Import & merge</button>' +
+    '<button class="btn btn-danger grow" data-x="ir">Replace…</button></div></div>';
+  const fi = document.createElement('input');
+  fi.type = 'file'; fi.accept = '.json,application/json'; fi.style.display = 'none';
+  c.appendChild(fi);
+  let mode = 'merge';
+  const pick = (m2) => { mode = m2; fi.value = ''; fi.click(); };
+  c.querySelector('[data-x=ex]').onclick = () => exportBackup();
+  c.querySelector('[data-x=im]').onclick = () => pick('merge');
+  c.querySelector('[data-x=ir]').onclick = async () => {
+    if (await confirmDlg('Replace ALL data on this device with the backup file?', 'Replace')) pick('replace');
+  };
+  fi.onchange = async () => {
+    const f = fi.files && fi.files[0];
+    if (!f) return;
+    const r = importBackup(await f.text(), mode);
+    if (r.error){ toast(r.error); return; }
+    toast('Backup ' + (mode === 'replace' ? 'restored' : 'merged') + ' — ' + r.entities + ' entities');
+    renderCurrent();
+  };
+}
 
 /* ============================ BOOT ============================ */
 loadData();
