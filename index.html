@@ -216,7 +216,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v2.1'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v2.2'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1238,10 +1238,12 @@ function openTxnEditor(id){
   const cl = (t.splits && t.splits.length) ? { icon: '🔀', name: t.splits.length + '-way split' } : catLabel(t.cat);
   const html =
     '<div class="txn-head">' +
-      '<div class="amt-big" style="font-size:30px;font-weight:800">' + fmt$(t.amt, { signed: t.amt > 0 }) + '</div>' +
+      '<div class="amt-big" style="font-size:30px;font-weight:800' + (t.amt > 0 ? ';color:var(--status-good)' : '') + '">' + fmt$(t.amt, { signed: t.amt > 0 }) +
+        ' <span style="font-size:13px;font-weight:600;color:var(--dim)">' + (t.amt > 0 ? 'money IN' : 'money OUT') + '</span></div>' +
       '<div style="font-weight:700;overflow-wrap:anywhere">' + esc(t.m) + '</div>' +
       '<div class="tiny" style="overflow-wrap:anywhere">' + esc(t.mraw) + '</div>' +
       '<div class="muted">' + fmtDate(t.date) + ' · ' + esc(accountName(t.acct)) + '</div>' +
+      '<button class="btn btn-sm" data-x="flip" style="margin-top:8px">⇄ Flip to money ' + (t.amt > 0 ? 'OUT' : 'IN') + '</button>' +
     '</div>' +
     '<div class="card" style="padding:4px 12px;margin-bottom:10px"><div class="list-item" data-x="cat">' +
       '<span class="ic">' + cl.icon + '</span><div class="body"><div class="t1">' + esc(cl.name) + '</div>' +
@@ -1277,6 +1279,13 @@ function openTxnEditor(id){
       if (n) toast('+' + n + ' more auto-categorized');
     }
     m.close(); renderCurrent(); toast('Categorized');
+  };
+  q('[data-x=flip]').onclick = async () => {
+    if (!(await confirmDlg('Flip this from money ' + (t.amt > 0 ? 'IN to money OUT' : 'OUT to money IN') +
+      '? Use this only when the bank imported the amount in the wrong direction.', 'Flip'))) return;
+    t.amt = -t.amt;
+    if (t.splits) t.splits = t.splits.map((p) => ({ cat: p.cat, amt: -p.amt, note: p.note }));
+    put('txns', t); m.close(); renderCurrent(); toast('Direction flipped');
   };
   q('[data-x=split]').onclick = () => { m.close(); openSplitEditor(t); };
   q('[data-x=transfer]').onclick = () => {
@@ -1511,7 +1520,7 @@ function renderHome(){
       const negs = st.months.filter((ym) => agg[ym].spendTotal < 0);
       return negs.length
         ? '<p style="margin:0 0 6px;color:var(--status-crit)">⚠️ ' + negs.map(fmtMonth).join(', ') +
-          (negs.length > 1 ? ' show' : ' shows') + ' <b>negative total spending</b> — money-in is filed under a spending category and every number here is wrong until it’s fixed. More → Data health lists the culprits.</p>'
+          (negs.length > 1 ? ' show' : ' shows') + ' <b>negative total spending</b> — a money-in transaction is sitting in a spending category (or an expense imported backwards). Every number here is off until it’s fixed. More → Data health lists the culprits.</p>'
         : '';
     })() +
     (st.invest > 0 ? '<p class="muted" style="margin:0 0 6px">📈 Plus ' + fmt$(st.invest) + ' invested — kept separate from spending.</p>' : '') +
@@ -2350,8 +2359,8 @@ function renderHealthScreen(c){
     html += '<div class="card" style="border-color:var(--status-crit)"><h3>⚠️ Math-breaking anomalies</h3>' +
       (negMonths.length ? '<p style="margin:0 0 8px">' + negMonths.map(fmtMonth).join(', ') +
         (negMonths.length > 1 ? ' have' : ' has') + ' <b>negative total spending</b>.</p>' : '') +
-      (susp.length ? '<p class="muted" style="margin:0 0 8px">These deposits are categorized as <b>spending</b>, so each one subtracts from its month. ' +
-        'Genuine refunds are fine; big ones are usually transfers or income wearing the wrong category. Tap to fix:</p>' +
+      (susp.length ? '<p class="muted" style="margin:0 0 8px">These show as <b>money IN</b> but sit in a <b>spending</b> category, so each subtracts from that month. ' +
+        'If it truly is an inflow (a gift, refund, transfer), recategorize it. If it was a real expense the bank imported backwards, open it and tap <b>⇄ Flip</b>. Small refunds are fine. Tap to fix:</p>' +
         susp.slice(0, 12).map((t) => txnRowHTML(t)).join('') : '') +
       '</div>';
   }
