@@ -216,7 +216,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v2.7'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v2.8'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -844,14 +844,22 @@ function budgetFor(catId, baseline){
   if (baseline && baseline.cats[catId]) return { amt: baseline.cats[catId], source: 'baseline' };
   return null;
 }
-// Subscriptions / recurring charges, detected from merchant cadence + amount stability.
+// Recurring charges, detected from merchant cadence. Each is classified:
+//   stable  = amount barely moves (subscriptions, mortgage) -> a fixed bill
+//   variable = same cadence, bouncing amount (electric, gas, CC payment) -> est + range
+// Transfers (e.g. CC payments) are INCLUDED but flagged kind:'transfer' so the
+// UI can show them for cash-flow awareness without counting them as spending.
 function detectRecurring(){
   const byM = {};
   for (const t of liveTxns()){
     if (t.status === 'excluded' || t.amt >= 0) continue;
-    if (t.cat && catKind(t.cat) === 'transfer') continue;
+    if (t.splits && t.splits.length) continue; // split txns aren't a single recurring line
     (byM[t.m] = byM[t.m] || []).push(t);
   }
+  const perToMonthly = (v, period) => period === 'monthly' ? v
+    : period === 'weekly' ? Math.round(v * 52 / 12)
+    : period === 'quarterly' ? Math.round(v / 3)
+    : Math.round(v / 12);
   const out = [];
   for (const m in byM){
     const ts = byM[m].sort((a, b) => (a.date < b.date ? -1 : 1));
@@ -867,13 +875,14 @@ function detectRecurring(){
     if (!period) continue;
     const amts = ts.map((t) => -t.amt);
     const medAmt = median(amts);
-    if (!amts.every((a) => Math.abs(a - medAmt) <= Math.max(200, medAmt * 0.15))) continue;
-    const monthly = period === 'monthly' ? medAmt
-      : period === 'weekly' ? Math.round(medAmt * 52 / 12)
-      : period === 'quarterly' ? Math.round(medAmt / 3)
-      : Math.round(medAmt / 12);
-    out.push({ merchant: m, period, amt: medAmt, monthly, count: ts.length,
-               last: ts[ts.length - 1].date, cat: ts[ts.length - 1].cat });
+    const avgAmt = Math.round(amts.reduce((s, a) => s + a, 0) / amts.length);
+    const minA = Math.min.apply(null, amts), maxA = Math.max.apply(null, amts);
+    const stable = amts.every((a) => Math.abs(a - medAmt) <= Math.max(200, medAmt * 0.15));
+    const cat = ts[ts.length - 1].cat;
+    const kind = cat ? catKind(cat) : 'expense';
+    out.push({ merchant: m, period, count: ts.length, last: ts[ts.length - 1].date, cat, kind,
+               stable, amt: medAmt, avg: avgAmt, min: minA, max: maxA,
+               monthly: perToMonthly(stable ? medAmt : avgAmt, period) });
   }
   return out.sort((a, b) => b.monthly - a.monthly);
 }
@@ -1656,10 +1665,11 @@ function renderHome(){
     '<p class="tiny" style="margin:8px 0 0">Tap a month for its full breakdown — budgets, categories, gifts, alcohol, groceries…</p></div>';
 
   const rec = detectRecurring();
-  if (rec.length){
-    const rt = rec.reduce((s, r) => s + r.monthly, 0);
+  const recBills = rec.filter((r) => r.kind === 'expense'); // transfers shown in Recurring screen, not the load
+  if (recBills.length){
+    const rt = recBills.reduce((s, r) => s + r.monthly, 0);
     html += '<div class="card" data-x="recur" style="cursor:pointer"><div class="row"><span style="font-size:18px">🔁</span>' +
-      '<div class="grow muted">Recurring load: <b style="color:var(--text)">' + fmt$(rt) + '/mo</b> across ' + rec.length + ' repeat bills</div>' +
+      '<div class="grow muted">Recurring load: <b style="color:var(--text)">' + fmt$(rt) + '/mo</b> across ' + recBills.length + ' repeat bills</div>' +
       '<span class="menu-chev">›</span></div></div>';
   }
   html += '<button class="btn btn-primary btn-block" data-x="import" style="margin-bottom:16px">📥 Import statements</button>';
@@ -2432,14 +2442,42 @@ function renderRecurringScreen(c){
     c.innerHTML = '<div class="empty">Nothing recurring detected yet.<br><span class="tiny">Needs 3+ charges from the same merchant on a steady cadence.</span></div>';
     return;
   }
-  const total = rec.reduce((s, r) => s + r.monthly, 0);
-  c.innerHTML = '<div class="stat" style="margin-bottom:12px"><div class="v">' + fmt$(total) + '/mo</div>' +
-    '<div class="l">' + rec.length + ' recurring charges</div></div>' +
-    '<div class="card">' + rec.map((r) =>
-      '<div class="list-item" style="cursor:default"><span class="ic">' + catLabel(r.cat).icon + '</span>' +
-      '<div class="body"><div class="t1">' + esc(r.merchant) + '</div>' +
-      '<div class="t2">' + r.period + ' ' + fmt$(r.amt) + ' · seen ' + r.count + '× · last ' + fmtDate(r.last) + ' · ' + esc(catLabel(r.cat).name) + '</div></div>' +
-      '<span class="amt">' + fmt$(r.monthly) + '/mo</span></div>').join('') + '</div>';
+  const fixed = rec.filter((r) => r.kind === 'expense' && r.stable);
+  const variable = rec.filter((r) => r.kind === 'expense' && !r.stable);
+  const transfers = rec.filter((r) => r.kind === 'transfer');
+  const billTotal = [...fixed, ...variable].reduce((s, r) => s + r.monthly, 0);
+
+  const fixedRow = (r) =>
+    '<div class="list-item" style="cursor:default"><span class="ic">' + catLabel(r.cat).icon + '</span>' +
+    '<div class="body"><div class="t1">' + esc(r.merchant) + '</div>' +
+    '<div class="t2">' + r.period + ' · seen ' + r.count + '× · last ' + fmtDate(r.last) + ' · ' + esc(catLabel(r.cat).name) + '</div></div>' +
+    '<span class="amt">' + fmt$(r.monthly) + '/mo</span></div>';
+  // Variable rows lead with the estimate, then the historical min–max range.
+  const varRow = (r) =>
+    '<div class="list-item" style="cursor:default"><span class="ic">' + catLabel(r.cat).icon + '</span>' +
+    '<div class="body"><div class="t1">' + esc(r.merchant) + '</div>' +
+    '<div class="t2">' + r.period + ' · ranges ' + fmt$(r.min) + '–' + fmt$(r.max) + ' · seen ' + r.count + '× · ' + esc(catLabel(r.cat).name) + '</div></div>' +
+    '<span class="amt" style="text-align:right">~' + fmt$(r.monthly) + '<div class="tiny">/mo est</div></span></div>';
+
+  let html = '<div class="stat" style="margin-bottom:12px"><div class="v">' + fmt$(billTotal) + '/mo</div>' +
+    '<div class="l">estimated recurring bills</div></div>';
+
+  if (fixed.length)
+    html += '<div class="card"><h3>Fixed — same price</h3>' + fixed.map(fixedRow).join('') + '</div>';
+
+  if (variable.length){
+    const vTot = variable.reduce((s, r) => s + r.monthly, 0);
+    html += '<div class="card"><h3>Variable — changes monthly</h3>' +
+      '<p class="tiny" style="margin:0 0 6px">Utilities, and other bills that bounce around. Estimate is your average; range is what you’ve actually paid. ≈ ' + fmt$(vTot) + '/mo.</p>' +
+      variable.map(varRow).join('') + '</div>';
+  }
+
+  if (transfers.length)
+    html += '<div class="card"><h3>Recurring transfers</h3>' +
+      '<p class="tiny" style="margin:0 0 6px">Card payments &amp; the like — repeat every month but aren’t spending (the purchases they cover are). Shown for cash-flow awareness; not in the total above.</p>' +
+      transfers.map(varRow).join('') + '</div>';
+
+  c.innerHTML = html;
 }
 
 /* ---- Categories & Rules screen ---- */
