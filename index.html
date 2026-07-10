@@ -180,6 +180,13 @@ table.map-tbl th{color:var(--dim); font-weight:600}
 input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 .rule-pat{font-family:ui-monospace,Menlo,monospace; font-size:12px; background:var(--bg);
   border:1px solid var(--line); border-radius:6px; padding:2px 6px; overflow-wrap:anywhere}
+.bl-row{display:flex; gap:8px; margin-bottom:10px}
+.bl-tile{flex:1; text-align:center; background:var(--card2); border:1px solid var(--line); border-radius:12px; padding:11px 4px}
+.bl-tile .bl-v{font-size:19px; font-weight:800; font-variant-numeric:tabular-nums; white-space:nowrap}
+.bl-tile .bl-l{font-size:11px; color:var(--dim); margin-top:3px}
+.bl-proj{display:flex; align-items:center; gap:10px; border-radius:12px; padding:10px 14px; border:1px solid var(--line)}
+.bl-proj.good{background:rgba(12,163,12,.10); border-color:rgba(12,163,12,.32)}
+.bl-proj.bad{background:rgba(208,59,59,.10); border-color:rgba(208,59,59,.32)}
 .sub-head{font-size:13px; font-weight:600; color:var(--dim); padding:9px 2px 5px 14px; border-bottom:1px solid var(--line);
   margin-left:6px; border-left:2px solid var(--line)}
 .sub-head span:last-child{font-variant-numeric:tabular-nums}
@@ -225,7 +232,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v3.5'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v3.6'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1369,6 +1376,43 @@ function openCatPicker(opts){
   });
 }
 
+/* ---- manual transaction entry ---- */
+function openAddTxn(defaultAcct){
+  const accts = liveAccounts();
+  if (!accts.length){ toast('Add an account first'); openScreen('Accounts', renderAccountsScreen); return; }
+  let dir = 'out', cat = null;
+  const today = new Date(); const todayISO = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
+  const m = modal('Add transaction',
+    '<div class="seg" style="margin-bottom:12px"><button data-d="out" class="on">Money out</button><button data-d="in">Money in</button></div>' +
+    '<div class="row"><label class="fld grow"><span>Amount</span><input type="number" step="0.01" min="0" inputmode="decimal" data-x="amt" placeholder="0.00"></label>' +
+    '<label class="fld grow"><span>Date</span><input type="date" data-x="date" value="' + todayISO + '"></label></div>' +
+    '<label class="fld"><span>Description</span><input type="text" data-x="desc" placeholder="e.g. Costco, rent, paycheck"></label>' +
+    '<label class="fld"><span>Account</span><select data-x="acct">' + acctOptions(defaultAcct || accts[0].id) + '</select></label>' +
+    '<button class="btn btn-block" data-x="cat" style="text-align:left;margin-bottom:10px">🏷️ Category — tap to pick (optional)</button>' +
+    '<label class="fld"><span>Note (optional)</span><input type="text" data-x="note"></label>' +
+    '<button class="btn btn-primary btn-block" data-x="save">Add transaction</button>');
+  const q = (s) => m.node.querySelector(s);
+  m.node.querySelectorAll('[data-d]').forEach((b) => { b.onclick = () => { dir = b.dataset.d; m.node.querySelectorAll('[data-d]').forEach((x) => x.classList.toggle('on', x === b)); }; });
+  q('[data-x=cat]').onclick = async () => {
+    const picked = await openCatPicker({ showSystem: true });
+    if (picked){ cat = picked; q('[data-x=cat]').textContent = catLabel(cat).icon + ' ' + catLabel(cat).name; }
+  };
+  q('[data-x=save]').onclick = () => {
+    const cents = parseAmountCents(q('[data-x=amt]').value);
+    const desc = q('[data-x=desc]').value.trim();
+    const date = parseDateISO(q('[data-x=date]').value);
+    if (!cents || cents <= 0){ toast('Enter an amount'); return; }
+    if (!desc){ toast('Enter a description'); return; }
+    if (!date){ toast('Enter a valid date'); return; }
+    const amt = dir === 'out' ? -cents : cents;
+    put('txns', { id: uid(), acct: q('[data-x=acct]').value, date, amt,
+      mraw: desc, m: normMerchant(desc), cat: cat || null, splits: null,
+      note: q('[data-x=note]').value.trim(), tags: [], status: cat ? 'ok' : 'review',
+      fp: 'manual|' + uid(), batch: 'manual', src: 'manual' });
+    m.close(); renderCurrent(); toast('Transaction added');
+  };
+}
+
 /* ---- transaction editor ---- */
 function openTxnEditor(id){
   const t = DATA.txns[id];
@@ -1734,37 +1778,37 @@ function renderHome(){
     : { inc: st.income, sp: st.spend, label: 'overall' };
   const lNet = lens.inc - lens.sp;
   const lRate = lens.inc > 0 ? Math.round(100 * lNet / lens.inc) : null;
+  const proj = HOME_BL === 'recurring' ? st.projRecur : HOME_BL === 'oneoff' ? null : st.proj;
   html += '<div class="card"><h3>The bottom line</h3>' +
-    '<div class="seg" style="margin-bottom:10px">' +
+    '<div class="seg" style="margin-bottom:12px">' +
     '<button data-bl="overall" class="' + (HOME_BL === 'overall' ? 'on' : '') + '">Overall</button>' +
     '<button data-bl="recurring" class="' + (HOME_BL === 'recurring' ? 'on' : '') + '">Recurring</button>' +
     '<button data-bl="oneoff" class="' + (HOME_BL === 'oneoff' ? 'on' : '') + '">One-off</button></div>' +
-    '<p style="margin:0 0 6px">' + (lens.label === 'overall' ? 'Net' : lens.label[0].toUpperCase() + lens.label.slice(1) + ' net') + ' so far: ' +
-    '<b style="color:' + (lNet >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(lNet, { signed: true }) + '</b> ' +
-    '<span class="muted">(' + fmt$(lens.inc) + ' in · ' + fmt$(lens.sp) + ' out' + (lRate !== null && lNet >= 0 ? ' · keeping ' + lRate + '%' : '') + ')</span></p>' +
-    (HOME_BL === 'recurring'
-      ? (st.projRecur
-          ? '<p style="margin:0 0 6px">Recurring so far ' + fmt$(st.spend - st.spendOneTimeAgg) + ' out / ' + fmt$(st.incomeRecur) + ' in, plus ' + fmt$(st.projRecur.rateSpend) + '/mo out · ' + fmt$(st.projRecur.rateIncome) + '/mo in the rest of ' + esc(UI.year) + ' → year-end ' +
-            '<b>' + fmt$(st.projRecur.spend) + ' out / ' + fmt$(st.projRecur.income) + ' in</b>, net <b style="color:' + (st.projRecur.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(st.projRecur.net, { signed: true }) + '</b>' +
-            (st.projRecur.net >= 0 ? ' — sustainable.' : ' — bills outrun paychecks.') + '</p>'
-          : '') +
-        '<p class="tiny" style="margin:0">The sustainable picture: paychecks vs bills &amp; everyday spending, one-offs stripped out.</p>'
+    // Three scannable tiles: In / Out / Net.
+    '<div class="bl-row">' +
+      '<div class="bl-tile"><div class="bl-v amt-pos">' + fmt$(lens.inc) + '</div><div class="bl-l">In so far</div></div>' +
+      '<div class="bl-tile"><div class="bl-v">' + fmt$(lens.sp) + '</div><div class="bl-l">Out so far</div></div>' +
+      '<div class="bl-tile"><div class="bl-v" style="color:' + (lNet >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(lNet, { signed: true }) + '</div>' +
+        '<div class="bl-l">Net' + (lRate !== null && lNet >= 0 ? ' · saving ' + lRate + '%' : '') + '</div></div>' +
+    '</div>' +
+    // Projection strip (overall/recurring only).
+    (proj
+      ? '<div class="bl-proj ' + (proj.net >= 0 ? 'good' : 'bad') + '">' +
+        '<div class="grow"><div class="tiny" style="text-transform:uppercase;letter-spacing:.5px">Projected end of ' + esc(UI.year) + '</div>' +
+        '<b style="font-size:19px;color:' + (proj.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(proj.net, { signed: true }) + '</b> ' +
+        '<span class="tiny">' + (proj.net >= 0 ? '▲ on track to come out ahead' : '▼ on pace to go under') + '</span></div>' +
+        '<div class="tiny" style="text-align:right;white-space:nowrap">' + fmt$(proj.rateIncome) + '/mo in<br>' + fmt$(proj.rateSpend) + '/mo out</div></div>'
       : HOME_BL === 'oneoff'
-      ? '<p class="tiny" style="margin:0">One-time money only — seed transfers, gifts received, wedding &amp; house costs. It doesn’t repeat, so there’s no forward pace; this is the net effect of the year’s big irregular events.</p>'
-      : (st.proj
-          ? '<p style="margin:0 0 6px">So far ' + fmt$(st.spend) + ' out / ' + fmt$(st.income) + ' in, plus an estimated ' + fmt$(st.proj.restSpend) + ' out · ' + fmt$(st.proj.restIncome) + ' in the rest of ' + esc(UI.year) + ' (at ' + fmt$(st.proj.rateSpend) + '/mo · ' + fmt$(st.proj.rateIncome) + '/mo) → year-end ' +
-            '<b>' + fmt$(st.proj.spend) + ' out / ' + fmt$(st.proj.income) + ' in</b>, net <b style="color:' + (st.proj.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(st.proj.net, { signed: true }) + '</b>' +
-            (st.proj.net >= 0 ? ' — on pace to come out ahead.' : ' — on pace to go under; “Where to cut” below.') + '</p>' +
-            '<p class="tiny" style="margin:0 0 6px">Actuals to date (incl. one-offs) plus the recurring rate for the remaining months. Toggle <b>Recurring</b> for the sustainable-only view.</p>'
-          : '')) +
+      ? '<p class="tiny" style="margin:0">One-time money only — seed transfers, gifts, wedding &amp; house costs. It doesn’t repeat, so there’s no forward pace; this is the net of the year’s big irregular events.</p>'
+      : '') +
     (() => {
       const negs = st.months.filter((ym) => agg[ym].spendTotal < 0);
       return negs.length
-        ? '<p style="margin:6px 0 0;color:var(--status-crit)">⚠️ ' + negs.map(fmtMonth).join(', ') +
-          (negs.length > 1 ? ' show' : ' shows') + ' <b>negative total spending</b> — a money-in transaction is sitting in a spending category (or an expense imported backwards). More → Data health lists the culprits.</p>'
+        ? '<p style="margin:8px 0 0;color:var(--status-crit)" class="tiny">⚠️ ' + negs.map(fmtMonth).join(', ') +
+          ' show <b>negative spending</b> — money-in in a spend category. More → Data health.</p>'
         : '';
     })() +
-    (HOME_BL === 'overall' && st.invest > 0 ? '<p class="muted" style="margin:6px 0 0">📈 Plus ' + fmt$(st.invest) + ' invested — kept separate from spending.</p>' : '') +
+    (HOME_BL === 'overall' && st.invest > 0 ? '<p class="muted tiny" style="margin:8px 0 0">📈 Plus ' + fmt$(st.invest) + ' invested — separate from spending.</p>' : '') +
     '</div>';
 
   if (rq.length){
@@ -1833,16 +1877,22 @@ function renderHome(){
     };
   });
   c.querySelectorAll('[data-ym]').forEach((n2) => {
-    n2.onclick = () => { UI.month = n2.dataset.ym; openScreen('Monthly detail', renderMonthScreen); };
+    n2.onclick = () => openMonthModal(n2.dataset.ym);
   });
-  // Tapping a bar opens that month's full page (not just a caption).
+  // Tapping a bar pops up that month's full detail over the year view.
   c.querySelectorAll('[data-m]').forEach((r2) => {
-    r2.onclick = () => { UI.month = r2.dataset.m; openScreen('Monthly detail', renderMonthScreen); };
+    r2.onclick = () => openMonthModal(r2.dataset.m);
   });
 }
 
 /* ---- Monthly detail — everything about one month ---- */
-function renderMonthScreen(c){
+// Opens a month's full detail as a scrollable popup over the current view.
+function openMonthModal(ym){
+  UI.month = ym;
+  const m = modal('', '<div data-x="mbody"></div>');
+  renderMonthScreen(m.node.querySelector('[data-x=mbody]'), m.close);
+}
+function renderMonthScreen(c, close){
   const agg = buildMonthAgg();
   if (!UI.month) UI.month = currentYM();
   const ym = UI.month;
@@ -1854,7 +1904,9 @@ function renderMonthScreen(c){
   const mRecurIn = mAgg.incomeRecur || 0, mOneIn = (mAgg.incomeTotal || 0) - mRecurIn;
   const mRecurSp = (mAgg.spendTotal || 0) - (mAgg.spendOneTime || 0), mOneSp = mAgg.spendOneTime || 0;
 
-  let html = '<div class="month-nav"><button data-x="prev">‹</button><b>' + fmtMonth(ym) + '</b>' +
+  let html = '';
+  if (close) html += '<div class="row" style="margin-bottom:6px"><button class="btn btn-sm" data-x="mclose">✕ Close</button><div class="grow"></div></div>';
+  html += '<div class="month-nav"><button data-x="prev">‹</button><b>' + fmtMonth(ym) + '</b>' +
     '<button data-x="next"' + (ym >= currentYM() ? ' disabled' : '') + '>›</button></div>';
 
   // Headline: money in / out / net for the month.
@@ -1913,20 +1965,22 @@ function renderMonthScreen(c){
   html += '<button class="btn btn-block" data-x="alla" style="margin-bottom:16px">Open ' + fmtMonth(ym) + ' in Activity →</button>';
   c.innerHTML = html;
 
-  c.querySelector('[data-x=prev]').onclick = () => { UI.month = shiftYM(ym, -1); renderMonthScreen(c); };
-  c.querySelector('[data-x=next]').onclick = () => { UI.month = shiftYM(ym, 1); renderMonthScreen(c); };
+  const nav = (fn) => { if (close) close(); fn(); }; // leave the popup before switching tabs
+  c.querySelector('[data-x=prev]').onclick = () => { UI.month = shiftYM(ym, -1); renderMonthScreen(c, close); };
+  c.querySelector('[data-x=next]').onclick = () => { UI.month = shiftYM(ym, 1); renderMonthScreen(c, close); };
   const on = (sel, fn) => { const n2 = c.querySelector(sel); if (n2) n2.onclick = fn; };
-  on('[data-x=alla]', () => { actSetMonth(ym); ACT.cat = null; showTab('activity'); });
-  on('[data-x=gob]', () => openScreen('Budgets & Baseline', renderBudgetsScreen));
-  c.querySelectorAll('[data-aidm]').forEach((n2) => { n2.onclick = () => openAccountEditor(n2.dataset.aidm, () => renderMonthScreen(c)); });
+  on('[data-x=mclose]', () => close && close());
+  on('[data-x=alla]', () => nav(() => { actSetMonth(ym); ACT.cat = null; showTab('activity'); }));
+  on('[data-x=gob]', () => nav(() => openScreen('Budgets & Baseline', renderBudgetsScreen)));
+  c.querySelectorAll('[data-aidm]').forEach((n2) => { n2.onclick = () => openAccountEditor(n2.dataset.aidm, () => renderMonthScreen(c, close)); });
   c.querySelectorAll('.list-item[data-cat]').forEach((n2) => {
     n2.onclick = () => {
-      if (n2.dataset.cat === '__uncat'){ showTab('review'); return; }
-      ACT.cat = n2.dataset.cat; actSetMonth(ym); showTab('activity');
+      if (n2.dataset.cat === '__uncat'){ nav(() => showTab('review')); return; }
+      ACT.cat = n2.dataset.cat; actSetMonth(ym); nav(() => showTab('activity'));
     };
   });
   c.querySelectorAll('[data-m]').forEach((r2) => {
-    r2.onclick = () => { UI.month = r2.dataset.m; renderMonthScreen(c); };
+    r2.onclick = () => { UI.month = r2.dataset.m; renderMonthScreen(c, close); };
   });
 }
 /* ---- §Review (two modes: auto-sort queue + manual verify pass) ---- */
@@ -2160,6 +2214,7 @@ function renderActivity(){
   let html =
     '<div class="row" style="margin-bottom:8px">' +
     '<input type="text" data-x="q" placeholder="Search merchants & notes…" value="' + esc(ACT.q) + '" class="grow">' +
+    '<button class="btn btn-sm btn-primary" data-x="fadd">＋ Add</button>' +
     '<button class="btn btn-sm" data-x="fsel">' + (ACT.select ? 'Done' : 'Select') + '</button></div>' +
     '<div class="filter-selects">' +
       sel('fy', ACT.year, yearOpts, ACT.year ? 'act' : '') +
@@ -2248,6 +2303,7 @@ function renderActivity(){
     clearTimeout(qTimer);
     qTimer = setTimeout(() => { ACT.q = e.target.value; ACT.limit = 200; drawList(); }, 200);
   };
+  q('[data-x=fadd]').onclick = () => openAddTxn(ACT.acct);
   q('[data-x=fsel]').onclick = () => { ACT.select = !ACT.select; if (!ACT.select) ACT.sel.clear(); renderActivity(); };
   const bindSel = (x, key) => { const s = q('[data-x=' + x + ']'); if (s) s.onchange = () => { ACT[key] = s.value || null; ACT.limit = 200; renderActivity(); }; };
   bindSel('fy', 'year'); bindSel('fmo', 'mo'); bindSel('fcat', 'cat'); bindSel('facc', 'acct'); bindSel('fst', 'status');
