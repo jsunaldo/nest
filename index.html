@@ -657,14 +657,21 @@ function buildMonthAgg(){
   for (const t of liveTxns()){
     if (t.status === 'excluded') continue;
     const ym = ymOf(t.date);
-    const bucket = out[ym] || (out[ym] = { spend: {}, spendTotal: 0, incomeTotal: 0, investTotal: 0 });
+    const bucket = out[ym] || (out[ym] = { spend: {}, spendTotal: 0, incomeTotal: 0, investTotal: 0,
+                                           incomeRecur: 0, spendOneTime: 0 });
     for (const part of effParts(t)){
       const kind = part.cat === '__uncat' ? 'expense' : catKind(part.cat);
       if (kind === 'transfer') continue;
       if (kind === 'invest'){ bucket.investTotal -= part.amt; continue; } // net invested; sells reduce it
-      if (kind === 'income'){ bucket.incomeTotal += part.amt; continue; }
+      if (kind === 'income'){
+        bucket.incomeTotal += part.amt;
+        if (part.cat !== 'inc-other') bucket.incomeRecur += part.amt; // windfalls/gifts-in never project forward
+        continue;
+      }
       bucket.spend[part.cat] = (bucket.spend[part.cat] || 0) - part.amt;
       bucket.spendTotal -= part.amt;
+      const g = groupOf(part.cat);
+      if (g && g.excludeFromBaseline) bucket.spendOneTime -= part.amt; // house/wedding: real, but finite
     }
   }
   return out;
@@ -745,15 +752,20 @@ function yearStats(agg, year){
   }
   st.net = st.income - st.spend;
   if (year === cur.slice(0, 4) && st.fullMonths.length){
+    // The forward pace only includes what plausibly continues: everyday
+    // spending — gifts out, dining out, all the "unnecessary" stuff — stays IN
+    // the rate (that's the honest picture), but finite one-time outflows
+    // (House Setup / Big Events) do not project forward. On the income side
+    // only recurring income projects; Other Income (gifts in, seed money,
+    // windfalls) counts once for what already happened.
     const recent = st.fullMonths.slice(-3);
-    const rSpend = recent.reduce((s, ym) => s + agg[ym].spendTotal, 0) / recent.length;
-    const rIncome = recent.reduce((s, ym) => s + agg[ym].incomeTotal, 0) / recent.length;
+    const rSpend = recent.reduce((s, ym) => s + agg[ym].spendTotal - agg[ym].spendOneTime, 0) / recent.length;
+    const rIncome = recent.reduce((s, ym) => s + agg[ym].incomeRecur, 0) / recent.length;
     const monthsLeft = 12 - (+cur.slice(5, 7));
-    const curSpent = agg[cur] ? agg[cur].spendTotal : 0;
-    const curIncome = agg[cur] ? agg[cur].incomeTotal : 0;
+    const curA = agg[cur] || { spendTotal: 0, spendOneTime: 0, incomeRecur: 0 };
     st.proj = {
-      spend: Math.round(st.spend - curSpent + Math.max(curSpent, rSpend) + rSpend * monthsLeft),
-      income: Math.round(st.income - curIncome + Math.max(curIncome, rIncome) + rIncome * monthsLeft),
+      spend: Math.round(st.spend + rSpend * monthsLeft + Math.max(0, rSpend - (curA.spendTotal - curA.spendOneTime))),
+      income: Math.round(st.income + rIncome * monthsLeft + Math.max(0, rIncome - curA.incomeRecur)),
       rateSpend: Math.round(rSpend), rateIncome: Math.round(rIncome),
     };
     st.proj.net = st.proj.income - st.proj.spend;
@@ -1484,7 +1496,8 @@ function renderHome(){
     (st.proj
       ? '<p style="margin:0 0 6px">At your recent pace — ' + fmt$(st.proj.rateSpend) + '/mo out, ' + fmt$(st.proj.rateIncome) + '/mo in — you’ll end ' + esc(UI.year) + ' around ' +
         '<b style="color:' + (st.proj.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(st.proj.net, { signed: true }) + '</b>' +
-        (st.proj.net >= 0 ? ' — on pace to come out ahead.' : ' — on pace to go under; “Where to cut” below.') + '</p>'
+        (st.proj.net >= 0 ? ' — on pace to come out ahead.' : ' — on pace to go under; “Where to cut” below.') + '</p>' +
+        '<p class="tiny" style="margin:0 0 6px">Pace includes everyday spending (yes, gifts &amp; dining) but not one-time house/wedding costs; only paycheck-style income projects forward — windfalls count once.</p>'
       : '') +
     (st.invest > 0 ? '<p class="muted" style="margin:0 0 6px">📈 Plus ' + fmt$(st.invest) + ' invested — kept separate from spending.</p>' : '') +
     (st.oneTime > 0 ? '<p class="muted" style="margin:0">🏠 One-time house / big-event spending: ' + fmt$(st.oneTime) + ' — excluded from your baseline.</p>' : '') +
