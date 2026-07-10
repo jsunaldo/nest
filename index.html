@@ -169,6 +169,10 @@ table.map-tbl th{color:var(--dim); font-weight:600}
 .banner-review{border-color:var(--accent); background:rgba(240,200,90,.08); cursor:pointer}
 .menu-chev{color:var(--faint)}
 .filter-row{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px}
+.month-strip{display:flex; gap:8px; overflow-x:auto; margin-bottom:10px; padding-bottom:4px;
+  -webkit-overflow-scrolling:touch; scrollbar-width:none}
+.month-strip::-webkit-scrollbar{display:none}
+.month-strip .chip{flex-shrink:0; white-space:nowrap}
 .tag-x{font-size:11px; opacity:.7; margin-left:2px}
 input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 .rule-pat{font-family:ui-monospace,Menlo,monospace; font-size:12px; background:var(--bg);
@@ -1724,6 +1728,12 @@ function actFiltered(){
     return true;
   }).sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0));
 }
+// Every month that actually has data, newest first — the source for month
+// pickers everywhere (native <input type="month"> is NOT supported on desktop
+// browsers, so we never use it).
+function dataMonths(){
+  return Array.from(new Set(liveTxns().map((t) => ymOf(t.date)))).sort().reverse();
+}
 // Filter sheet: all Activity filters in one place instead of chip gymnastics.
 function openActFilters(){
   const accts = liveAccounts();
@@ -1734,7 +1744,8 @@ function openActFilters(){
       accts.map((a) => '<option value="' + esc(a.id) + '"' + (ACT.acct === a.id ? ' selected' : '') + '>' + esc(a.name) + '</option>').join('') + '</select></label>' +
     '<label class="fld"><span>Category</span></label>' +
     '<button class="btn btn-block" data-x="fc" style="text-align:left;margin-bottom:10px">' + esc(catTxt(cat)) + '</button>' +
-    '<label class="fld"><span>Month (blank = all)</span><input type="month" data-x="fm" value="' + esc(ACT.month || '') + '"></label>' +
+    '<label class="fld"><span>Month</span><select data-x="fm"><option value="">All months</option>' +
+      dataMonths().map((ym) => '<option value="' + ym + '"' + (ACT.month === ym ? ' selected' : '') + '>' + fmtMonth(ym) + '</option>').join('') + '</select></label>' +
     '<label class="fld"><span>Status</span></label>' +
     '<div class="seg" style="margin-bottom:14px">' +
       '<button data-fs="" class="' + (!status ? 'on' : '') + '">All</button>' +
@@ -1760,8 +1771,7 @@ function openActFilters(){
   q2('[data-x=apply]').onclick = () => {
     ACT.acct = q2('[data-x=fa]').value || null;
     ACT.cat = cat;
-    const fm = q2('[data-x=fm]').value;
-    ACT.month = /^\d{4}-\d{2}$/.test(fm) ? fm : null;
+    ACT.month = q2('[data-x=fm]').value || null;
     ACT.status = status || null;
     ACT.limit = 200;
     m.close(); renderActivity();
@@ -1770,17 +1780,24 @@ function openActFilters(){
 function renderActivity(){
   const c = $('#view-activity');
   const catName = ACT.cat ? (ACT.cat === '__uncat' ? 'Uncategorized' : catLabel(ACT.cat).name) : null;
-  const nFilters = (ACT.acct ? 1 : 0) + (ACT.cat ? 1 : 0) + (ACT.month ? 1 : 0) + (ACT.status ? 1 : 0);
+  // Month = the ledger's primary axis: always visible, one tap, no form field.
+  const months = dataMonths();
+  const nFilters = (ACT.acct ? 1 : 0) + (ACT.cat ? 1 : 0) + (ACT.status ? 1 : 0);
   let html =
     '<div class="row" style="margin-bottom:10px">' +
     '<input type="text" data-x="q" placeholder="Search merchants & notes…" value="' + esc(ACT.q) + '" class="grow">' +
     '<button class="btn btn-sm' + (nFilters ? ' btn-primary' : '') + '" data-x="fopen">Filter' + (nFilters ? ' · ' + nFilters : '') + '</button>' +
     '<button class="btn btn-sm" data-x="fsel">' + (ACT.select ? 'Done' : 'Select') + '</button></div>';
+  if (months.length){
+    html += '<div class="month-strip">' +
+      '<span class="chip' + (!ACT.month ? ' on' : '') + '" data-mstrip="">All</span>' +
+      months.map((ym) => '<span class="chip' + (ACT.month === ym ? ' on' : '') + '" data-mstrip="' + ym + '">' + fmtMonth(ym) + '</span>').join('') +
+      '</div>';
+  }
   if (nFilters){
     html += '<div class="filter-row">' +
       (ACT.acct ? '<span class="chip on" data-clear="acct">' + esc(accountName(ACT.acct)) + '<span class="tag-x">×</span></span>' : '') +
       (ACT.cat ? '<span class="chip on" data-clear="cat">' + esc(catName) + '<span class="tag-x">×</span></span>' : '') +
-      (ACT.month ? '<span class="chip on" data-clear="month">' + fmtMonth(ACT.month) + '<span class="tag-x">×</span></span>' : '') +
       (ACT.status ? '<span class="chip on" data-clear="status">' + (ACT.status === 'review' ? 'Needs review' : 'Excluded') + '<span class="tag-x">×</span></span>' : '') +
       (nFilters > 1 ? '<span class="chip" data-clear="__all">Clear all</span>' : '') +
       '</div>';
@@ -1792,7 +1809,13 @@ function renderActivity(){
   function drawList(){
     const txns = actFiltered();
     const shown = txns.slice(0, ACT.limit);
-    let lh = '', lastYM = null;
+    const outS = txns.reduce((s, x) => s + (x.status !== 'excluded' && x.amt < 0 ? -x.amt : 0), 0);
+    const inS = txns.reduce((s, x) => s + (x.status !== 'excluded' && x.amt > 0 ? x.amt : 0), 0);
+    let lh = shown.length
+      ? '<div class="muted" style="margin:0 0 8px">' + txns.length + ' transaction' + (txns.length === 1 ? '' : 's') +
+        ' · ' + fmt$(outS) + ' out · ' + fmt$(inS) + ' in</div>'
+      : '';
+    let lastYM = null;
     for (const t of shown){
       const ym = ymOf(t.date);
       if (ym !== lastYM){
@@ -1860,6 +1883,11 @@ function renderActivity(){
   };
   q('[data-x=fopen]').onclick = () => openActFilters();
   q('[data-x=fsel]').onclick = () => { ACT.select = !ACT.select; if (!ACT.select) ACT.sel.clear(); renderActivity(); };
+  c.querySelectorAll('[data-mstrip]').forEach((ch) => {
+    ch.onclick = () => { ACT.month = ch.dataset.mstrip || null; ACT.limit = 200; renderActivity(); };
+  });
+  const onChip = c.querySelector('.month-strip .chip.on');
+  if (onChip && onChip.scrollIntoView) onChip.scrollIntoView({ inline: 'center', block: 'nearest' });
   c.querySelectorAll('[data-clear]').forEach((ch) => {
     ch.onclick = () => {
       if (ch.dataset.clear === '__all') ACT.acct = ACT.cat = ACT.month = ACT.status = null;
@@ -2060,9 +2088,12 @@ function renderBudgetsScreen(c){
   const s = settings();
   const baseline = baselineByCat(agg);
   const sugg = suggestBudgets(agg);
+  const dm = dataMonths().slice().reverse(); // oldest first, only months that exist
+  const monthSel = (x, val) => '<select data-x="' + x + '"><option value="">—</option>' +
+    dm.map((ym) => '<option value="' + ym + '"' + (val === ym ? ' selected' : '') + '>' + fmtMonth(ym) + '</option>').join('') + '</select>';
   let html = '<div class="card"><h3>Baseline window — your “natural” months</h3>' +
-    '<div class="row"><label class="fld grow"><span>From</span><input type="month" data-x="bfrom" value="' + esc(s.baselineFrom || '') + '"></label>' +
-    '<label class="fld grow"><span>To</span><input type="month" data-x="bto" value="' + esc(s.baselineTo || '') + '"></label></div>' +
+    '<div class="row"><label class="fld grow"><span>From</span>' + monthSel('bfrom', s.baselineFrom) + '</label>' +
+    '<label class="fld grow"><span>To</span>' + monthSel('bto', s.baselineTo) + '</label></div>' +
     '<p class="muted" style="margin:0">Pick pre-move months that reflect normal life. Natural budget = your typical month across that window (House Setup excluded).' +
     (baseline ? ' <b style="color:var(--text)">Baseline: ' + fmt$(baseline.total) + '/mo across ' + baseline.months + ' month' + (baseline.months > 1 ? 's' : '') + ' of data.</b>' : '') +
     '</p></div>';
