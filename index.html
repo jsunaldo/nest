@@ -137,7 +137,11 @@ label.fld span{display:block; font-size:12px; color:var(--dim); margin-bottom:4p
 .group-label{font-size:11px; color:var(--faint); text-transform:uppercase; letter-spacing:.6px; margin:12px 0 6px}
 
 /* charts */
-.chart-wrap{overflow-x:auto} .chart-wrap svg{display:block}
+.chart-wrap{overflow-x:auto; position:relative} .chart-wrap svg{display:block}
+.chart-tip{position:absolute; pointer-events:none; background:var(--card2); border:1px solid var(--line);
+  border-radius:8px; padding:6px 10px; font-size:12px; white-space:nowrap; box-shadow:0 4px 16px rgba(0,0,0,.5);
+  z-index:6; display:none; transform:translate(-50%,-125%); color:var(--text)}
+.chart-tip b{font-variant-numeric:tabular-nums}
 .legend{display:flex; flex-wrap:wrap; gap:10px; margin-top:8px; font-size:12px; color:var(--dim)}
 .legend i{display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:5px; vertical-align:-1px}
 
@@ -191,6 +195,15 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
   margin-left:6px; border-left:2px solid var(--line)}
 .sub-head span:last-child{font-variant-numeric:tabular-nums}
 .list-item.sub-item{padding-left:20px; margin-left:6px; border-left:2px solid var(--line)}
+.tree-row{display:flex; align-items:center; gap:10px; padding:11px 2px; border-bottom:1px solid var(--line); cursor:pointer}
+.tree-row .ic{width:34px; height:34px; border-radius:10px; background:var(--card2); display:flex; align-items:center; justify-content:center; font-size:16px; flex-shrink:0}
+.tree-row .body{flex:1; min-width:0}
+.tree-row .body .t1{font-weight:600; font-size:14px}
+.tree-row.grp .body .t1{font-weight:700}
+.tree-row .chev{color:var(--faint); width:18px; text-align:center; flex-shrink:0; font-size:12px}
+.tree-act{color:var(--accent); font-size:17px; padding:2px 6px; flex-shrink:0; cursor:pointer}
+.tree-l1{margin-left:6px; border-left:2px solid var(--line); padding-left:12px}
+.tree-l2{margin-left:14px; border-left:2px solid var(--line); padding-left:16px}
 </style>
 </head>
 <body>
@@ -232,25 +245,25 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v3.6'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v3.7'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
 const TOMBSTONE_DAYS = 90;
 
 const GROUPS = [
-  { id: 'g-inc',   name: 'Income',      kind: 'income' },
-  { id: 'g-hou',   name: 'Housing' }, // House Setup is now a subcategory here (see migration v1)
-  { id: 'g-event', name: 'Big Events', excludeFromBaseline: true },  // weddings etc. — one-time, not "natural" spend
-  { id: 'g-food',  name: 'Food' },
-  { id: 'g-tr',    name: 'Transport' },
-  { id: 'g-shop',  name: 'Shopping' },
-  { id: 'g-heal',  name: 'Health' },
-  { id: 'g-ent',   name: 'Entertainment' },
-  { id: 'g-per',   name: 'Personal' },
-  { id: 'g-tv',    name: 'Travel' },
-  { id: 'g-mo',    name: 'Money' },
-  { id: 'g-sys',   name: 'System', kind: 'system' },
+  { id: 'g-inc',   name: 'Income', icon: '💰', kind: 'income' },
+  { id: 'g-hou',   name: 'Housing', icon: '🏠' }, // House Setup is now a subcategory here (see migration v1)
+  { id: 'g-event', name: 'Big Events', icon: '🎉', excludeFromBaseline: true },  // weddings etc. — one-time
+  { id: 'g-food',  name: 'Food', icon: '🍽️' },
+  { id: 'g-tr',    name: 'Transport', icon: '🚗' },
+  { id: 'g-shop',  name: 'Shopping', icon: '🛍️' },
+  { id: 'g-heal',  name: 'Health', icon: '🩺' },
+  { id: 'g-ent',   name: 'Entertainment', icon: '🎬' },
+  { id: 'g-per',   name: 'Personal', icon: '🧍' },
+  { id: 'g-tv',    name: 'Travel', icon: '✈️' },
+  { id: 'g-mo',    name: 'Money', icon: '🏦' },
+  { id: 'g-sys',   name: 'System', icon: '⚙️', kind: 'system' },
 ];
 const SEED_CATS = [
   ['inc-pay',   'g-inc',  'Paycheck', '💵', 'income'],
@@ -437,6 +450,24 @@ function subsInGroup(groupId){
   for (const c of liveCats()) if (c.group === groupId && c.sub && !seen.includes(c.sub)) seen.push(c.sub);
   return seen;
 }
+// Subcategories carry their own icon (kv.subMeta, keyed group|sub).
+function subMetaMap(){ return (DATA.kv.subMeta && DATA.kv.subMeta.map) || {}; }
+function subIcon(groupId, sub){ const m = subMetaMap()[groupId + '|' + sub]; return (m && m.icon) || '📁'; }
+function setSubMeta(groupId, sub, patch){
+  const ent = DATA.kv.subMeta || { id: 'subMeta', map: {} };
+  ent.map = Object.assign({}, ent.map);
+  ent.map[groupId + '|' + sub] = Object.assign({}, ent.map[groupId + '|' + sub], patch);
+  put('kv', ent);
+}
+// Rename a subcategory across all its member categories (+ carry its icon over).
+function renameSub(groupId, oldSub, newSub){
+  newSub = (newSub || '').trim();
+  if (!newSub || newSub === oldSub) return;
+  for (const c of liveCats()) if (c.group === groupId && c.sub === oldSub){ c.sub = newSub; put('cats', c); }
+  const ic = subIcon(groupId, oldSub);
+  if (ic && ic !== '📁') setSubMeta(groupId, newSub, { icon: ic });
+}
+const CATS_OPEN = new Set(); // collapsible tree state: 'g:<gid>' and 'sub:<gid>|<sub>'
 const saveData = debounce(() => { try { localStorage.setItem(LSKEY, JSON.stringify(DATA)); } catch (e) {} }, 250);
 const saveNow = () => saveData.now();
 
@@ -1883,6 +1914,7 @@ function renderHome(){
   c.querySelectorAll('[data-m]').forEach((r2) => {
     r2.onclick = () => openMonthModal(r2.dataset.m);
   });
+  bindChartTips(c);
 }
 
 /* ---- Monthly detail — everything about one month ---- */
@@ -1979,6 +2011,7 @@ function renderMonthScreen(c, close){
       ACT.cat = n2.dataset.cat; actSetMonth(ym); nav(() => showTab('activity'));
     };
   });
+  bindChartTips(c);
   c.querySelectorAll('[data-m]').forEach((r2) => {
     r2.onclick = () => { UI.month = r2.dataset.m; renderMonthScreen(c, close); };
   });
@@ -2312,7 +2345,7 @@ function renderActivity(){
   drawList();
 }
 /* ---- §Trends ---- */
-function barPath(x, yTop, w, hgt, color, opacity){
+function barPath(x, yTop, w, hgt, color, opacity, attrs){
   if (hgt <= 0.5) return '';
   const r = Math.min(3, w / 2, hgt);
   return '<path d="M' + x.toFixed(1) + ',' + (yTop + hgt).toFixed(1) +
@@ -2320,7 +2353,26 @@ function barPath(x, yTop, w, hgt, color, opacity){
     ' Q' + x.toFixed(1) + ',' + yTop.toFixed(1) + ' ' + (x + r).toFixed(1) + ',' + yTop.toFixed(1) +
     ' L' + (x + w - r).toFixed(1) + ',' + yTop.toFixed(1) +
     ' Q' + (x + w).toFixed(1) + ',' + yTop.toFixed(1) + ' ' + (x + w).toFixed(1) + ',' + (yTop + r).toFixed(1) +
-    ' L' + (x + w).toFixed(1) + ',' + (yTop + hgt).toFixed(1) + ' Z" fill="' + color + '" opacity="' + opacity + '"/>';
+    ' L' + (x + w).toFixed(1) + ',' + (yTop + hgt).toFixed(1) + ' Z" fill="' + color + '" opacity="' + opacity + '"' + (attrs || '') + '/>';
+}
+// Wire hover tooltips for any [data-tip] element inside a chart wrapper.
+function bindChartTips(container){
+  container.querySelectorAll('.chart-wrap').forEach((wrap) => {
+    let tip = wrap.querySelector('.chart-tip');
+    if (!tip){ tip = el('div', { class: 'chart-tip' }); wrap.appendChild(tip); }
+    const move = (e) => {
+      const t = e.target.closest ? e.target.closest('[data-tip]') : null;
+      const d = t && t.getAttribute('data-tip');
+      if (!d){ tip.style.display = 'none'; return; }
+      const r = wrap.getBoundingClientRect();
+      const px = (e.touches ? e.touches[0].clientX : e.clientX) - r.left + wrap.scrollLeft;
+      const py = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
+      tip.innerHTML = d;
+      tip.style.left = px + 'px'; tip.style.top = py + 'px'; tip.style.display = 'block';
+    };
+    wrap.addEventListener('pointermove', move);
+    wrap.addEventListener('pointerleave', () => { tip.style.display = 'none'; });
+  });
 }
 // "Spending vs income" + "Where it goes" cards for the given months (rendered
 // on Home, scoped to the selected year). Caller binds taps via [data-m].
@@ -2345,7 +2397,7 @@ function yearChartsHTML(agg, months, sel, baseline){
   // Draw a bar as two stacked segments (recurring solid, one-time faded), bottom
   // up, with a 2px surface gap between them; only the topmost segment is rounded.
   const baseY = H1 - padB;
-  const stackBar = (x, segs, selected) => {
+  const stackBar = (x, ym, segs, selected) => {
     const nz = segs.filter((s) => s.v > 0);
     let acc = 0, out = '';
     segs.forEach((seg, i) => {
@@ -2355,8 +2407,10 @@ function yearChartsHTML(agg, months, sel, baseline){
       let bot = yS(acc);
       if (seg !== nz[0]) bot -= 2; // gap above the segment below
       const op = selected ? (isRecur ? 1 : 0.5) : (isRecur ? 0.7 : 0.32);
-      if (topmost) out += barPath(x, top, barW, bot - top, seg.color, op);
-      else out += '<rect x="' + x.toFixed(1) + '" y="' + top.toFixed(1) + '" width="' + barW + '" height="' + Math.max(0, bot - top).toFixed(1) + '" fill="' + seg.color + '" opacity="' + op + '"/>';
+      const tip = fmtMonth(ym) + ' · ' + seg.label + ' <b>' + seg.sign + fmt$(seg.v) + '</b>';
+      const attrs = ' data-m="' + ym + '" data-tip="' + esc(tip) + '" pointer-events="all" style="cursor:pointer"';
+      if (topmost) out += barPath(x, top, barW, bot - top, seg.color, op, attrs);
+      else out += '<rect x="' + x.toFixed(1) + '" y="' + top.toFixed(1) + '" width="' + barW + '" height="' + Math.max(0, bot - top).toFixed(1) + '" fill="' + seg.color + '" opacity="' + op + '"' + attrs + '/>';
       acc += seg.v;
     });
     return out;
@@ -2366,13 +2420,15 @@ function yearChartsHTML(agg, months, sel, baseline){
     const a = agg[ym], selected = ym === sel;
     const spendRecur = Math.max(0, a.spendTotal - a.spendOneTime), spendOne = Math.max(0, a.spendOneTime);
     const incRecur = Math.max(0, a.incomeRecur), incOne = Math.max(0, a.incomeTotal - a.incomeRecur);
-    s1 += stackBar(cx - barW - 1, [{ v: spendRecur, color: 'var(--viz-1)' }, { v: spendOne, color: 'var(--viz-1)' }], selected);
-    s1 += stackBar(cx + 1, [{ v: incRecur, color: 'var(--viz-2)' }, { v: incOne, color: 'var(--viz-2)' }], selected);
-    if (n <= 8 || i % 2 === 0 || ym === sel)
-      s1 += '<text x="' + cx.toFixed(1) + '" y="' + (H1 - 6) + '" text-anchor="middle" font-size="10" fill="var(--faint)">' + fmtMonth(ym).slice(0, 3) + '</text>';
-    if (ym === sel)
-      s1 += '<rect x="' + (cx - colW / 2 + 3).toFixed(1) + '" y="' + (H1 - padB + 3) + '" width="' + (colW - 6).toFixed(1) + '" height="2" rx="1" fill="var(--accent)"/>';
+    // Full-column hit target FIRST (below), so clicks in empty space still open
+    // the month; segments drawn on top own hover + their own clicks.
     s1 += '<rect data-m="' + ym + '" x="' + (padL + i * colW).toFixed(1) + '" y="0" width="' + colW.toFixed(1) + '" height="' + H1 + '" fill="transparent" pointer-events="all" style="cursor:pointer"/>';
+    s1 += stackBar(cx - barW - 1, ym, [{ v: spendRecur, color: 'var(--viz-1)', label: 'Recurring spend', sign: '−' }, { v: spendOne, color: 'var(--viz-1)', label: 'One-time spend', sign: '−' }], selected);
+    s1 += stackBar(cx + 1, ym, [{ v: incRecur, color: 'var(--viz-2)', label: 'Recurring income', sign: '+' }, { v: incOne, color: 'var(--viz-2)', label: 'One-off income', sign: '+' }], selected);
+    if (n <= 8 || i % 2 === 0 || ym === sel)
+      s1 += '<text x="' + cx.toFixed(1) + '" y="' + (H1 - 6) + '" text-anchor="middle" font-size="10" fill="var(--faint)" pointer-events="none">' + fmtMonth(ym).slice(0, 3) + '</text>';
+    if (ym === sel)
+      s1 += '<rect x="' + (cx - colW / 2 + 3).toFixed(1) + '" y="' + (H1 - padB + 3) + '" width="' + (colW - 6).toFixed(1) + '" height="2" rx="1" fill="var(--accent)" pointer-events="none"/>';
   });
   if (baseline){
     const by = yS(baseline.total).toFixed(1);
@@ -2391,12 +2447,7 @@ function yearChartsHTML(agg, months, sel, baseline){
       '<span><i style="background:var(--viz-1);opacity:.5"></i>One-time spend</span>' +
       '<span><i style="background:var(--viz-2)"></i>Recurring income</span>' +
       '<span><i style="background:var(--viz-2);opacity:.5"></i>One-off income</span></div>' +
-    '<div class="chart-caption">' + fmtMonth(sel) + ' — Spent ' + fmt$(sA.spendTotal) +
-    (sOne > 0 ? ' (' + fmt$(sRecur) + ' recurring + ' + fmt$(sOne) + ' one-time)' : '') +
-    ' · Income ' + fmt$(sA.incomeTotal) +
-    (iOne > 0 ? ' (' + fmt$(iRecur) + ' recurring + ' + fmt$(iOne) + ' one-off)' : '') +
-    ' · Net <b style="color:' + (net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(net, { signed: true }) + '</b>' +
-    '<br><span style="color:var(--faint)">Tap any bar to open that month.</span></div></div>';
+    '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Hover a bar segment for detail · tap a bar to open that month.</span></div></div>';
 
   /* -- card 2: where it goes, top-4 category lines + Other -- */
   const totals = {};
@@ -2741,6 +2792,80 @@ function openMergePicker(sourceId, after){
     };
   });
 }
+function openAddCatModal(gid, presetSub, after){
+  const m = modal('New category',
+    '<label class="fld"><span>Name</span><input type="text" data-x="nm"></label>' +
+    '<label class="fld"><span>Icon (one emoji)</span><input type="text" data-x="ic" maxlength="4" placeholder="🧺"></label>' +
+    '<label class="fld"><span>Subcategory (optional)</span><input type="text" data-x="sub" list="dl-addsub" value="' + esc(presetSub || '') + '" placeholder="e.g. Utilities"></label>' +
+    '<datalist id="dl-addsub">' + subsInGroup(gid).map((s) => '<option value="' + esc(s) + '"></option>').join('') + '</datalist>' +
+    '<button class="btn btn-primary btn-block" data-x="sv">Add</button>');
+  m.node.querySelector('[data-x=sv]').onclick = () => {
+    const name = m.node.querySelector('[data-x=nm]').value.trim();
+    if (!name) return;
+    const sv = m.node.querySelector('[data-x=sub]').value.trim();
+    const nc = { id: uid(), group: gid, name, icon: m.node.querySelector('[data-x=ic]').value.trim() || '•', kind: gid === 'g-inc' ? 'income' : 'expense' };
+    if (sv){ nc.sub = sv; CATS_OPEN.add('g:' + gid); CATS_OPEN.add('sub:' + gid + '|' + sv); }
+    else CATS_OPEN.add('g:' + gid);
+    put('cats', nc); m.close(); if (after) after(); toast('Category added');
+  };
+}
+function openCatEditor(catId, after){
+  const cat = DATA.cats[catId];
+  if (!cat) return;
+  const forcedOneTime = ONE_TIME_INCOME.has(cat.id) || (() => { const g = GROUPS.find((x) => x.id === cat.group); return !!(g && g.excludeFromBaseline); })();
+  const isSystem = cat.group === 'g-sys';
+  const curKind = cat.kind || 'expense';
+  const kindSel = isSystem ? '' :
+    '<label class="fld"><span>Type — decides how money here is counted</span><select data-x="kind">' +
+    [['expense', 'Expense (money out)'], ['income', 'Income (money in)'], ['invest', 'Investment (not spending)'], ['transfer', 'Transfer (ignored in totals)']]
+      .map(([v, lbl]) => '<option value="' + v + '"' + (curKind === v ? ' selected' : '') + '>' + lbl + '</option>').join('') +
+    '</select></label>';
+  const gName = (GROUPS.find((x) => x.id === cat.group) || {}).name || '';
+  const subSel = isSystem ? '' :
+    '<label class="fld"><span>Subcategory — groups it inside ' + esc(gName) + '</span>' +
+    '<input type="text" data-x="sub" list="dl-subs" value="' + esc(cat.sub || '') + '" placeholder="e.g. Utilities (optional)"></label>' +
+    '<datalist id="dl-subs">' + subsInGroup(cat.group).map((s) => '<option value="' + esc(s) + '"></option>').join('') + '</datalist>';
+  const m = modal('Edit category',
+    '<label class="fld"><span>Name</span><input type="text" data-x="nm" value="' + esc(cat.name) + '"></label>' +
+    '<label class="fld"><span>Icon</span><input type="text" data-x="ic" maxlength="4" value="' + esc(cat.icon || '') + '"></label>' +
+    kindSel + subSel +
+    '<label class="row" style="margin:0 0 12px"><input type="checkbox" data-x="ot" style="width:auto"' +
+      ((cat.oneTime || forcedOneTime) ? ' checked' : '') + (forcedOneTime ? ' disabled' : '') + '> ' +
+      '<span class="muted">One-time — exclude from future forecasts &amp; the baseline' + (forcedOneTime ? ' (always, for this group)' : '') + '</span></label>' +
+    '<button class="btn btn-block" data-x="merge" style="margin-bottom:8px">🔀 Merge into another category…</button>' +
+    '<div class="row"><button class="btn grow" data-x="sv">Save</button>' +
+    '<button class="btn btn-danger grow" data-x="ar">Archive</button></div>');
+  m.node.querySelector('[data-x=sv]').onclick = () => {
+    const name = m.node.querySelector('[data-x=nm]').value.trim();
+    if (!name) return;
+    cat.name = name; cat.icon = m.node.querySelector('[data-x=ic]').value.trim() || '•';
+    if (!isSystem) cat.kind = m.node.querySelector('[data-x=kind]').value;
+    if (!isSystem){ const sv = m.node.querySelector('[data-x=sub]').value.trim(); if (sv) cat.sub = sv; else delete cat.sub; }
+    if (!forcedOneTime) cat.oneTime = m.node.querySelector('[data-x=ot]').checked;
+    put('cats', cat); m.close(); if (after) after(); renderCurrent(); toast('Category updated');
+  };
+  m.node.querySelector('[data-x=merge]').onclick = () => { m.close(); openMergePicker(cat.id, after); };
+  m.node.querySelector('[data-x=ar]').onclick = async () => {
+    if (!(await confirmDlg('Archive “' + cat.name + '”? Existing transactions keep it; it just leaves the pickers.', 'Archive'))) return;
+    softDelete('cats', cat.id); m.close(); if (after) after();
+  };
+}
+function openSubEditor(key, after){
+  const bar = key.indexOf('|'); const gid = key.slice(0, bar), sub = key.slice(bar + 1);
+  const m = modal('Edit subcategory',
+    '<label class="fld"><span>Name</span><input type="text" data-x="nm" value="' + esc(sub) + '"></label>' +
+    '<label class="fld"><span>Icon (one emoji)</span><input type="text" data-x="ic" maxlength="4" value="' + esc(subIcon(gid, sub) === '📁' ? '' : subIcon(gid, sub)) + '" placeholder="📁"></label>' +
+    '<p class="tiny" style="margin:0 0 12px">Renaming updates every category filed under it.</p>' +
+    '<button class="btn btn-primary btn-block" data-x="sv">Save</button>');
+  m.node.querySelector('[data-x=sv]').onclick = () => {
+    const nm = m.node.querySelector('[data-x=nm]').value.trim();
+    const ic = m.node.querySelector('[data-x=ic]').value.trim();
+    if (!nm){ toast('Enter a name'); return; }
+    if (ic) setSubMeta(gid, sub, { icon: ic });
+    if (nm !== sub){ renameSub(gid, sub, nm); CATS_OPEN.delete('sub:' + gid + '|' + sub); CATS_OPEN.add('sub:' + gid + '|' + nm); }
+    m.close(); if (after) after(); renderCurrent(); toast('Subcategory updated');
+  };
+}
 function renderCatsScreen(c){
   // Surface duplicate names — the usual cause of "money in a spending category".
   const byName = {};
@@ -2753,28 +2878,37 @@ function renderCatsScreen(c){
       dupNames.map((k) => byName[k].map((c) => '<span class="chip" data-cid="' + esc(c.id) + '">' + esc(c.icon || '') + ' ' + esc(c.name) + ' · ' + esc(c.kind || 'expense') + '</span>').join(' ')).join('<br>') +
       '</div>';
   }
-  html += '<div class="card"><h3>Categories</h3>';
-  const catRow = (cat, indent) => {
+  html += '<div class="card"><h3>Categories</h3><p class="tiny" style="margin:0 0 4px">Tap a group or subcategory to expand · tap a category to edit</p>';
+  const catTags = (cat) => {
     const k = cat.kind || 'expense';
     const kindTag = k === 'income' ? '<span class="tiny" style="color:var(--status-good)">income</span>'
       : k === 'invest' ? '<span class="tiny" style="color:var(--blue)">investment</span>'
       : k === 'transfer' ? '<span class="tiny" style="color:var(--dim)">transfer</span>' : '';
     const otTag = catExcludedFromEstimates(cat) ? '<span class="tiny" style="color:var(--faint)"> · one-time</span>' : '';
-    return '<div class="list-item' + (indent ? ' sub-item' : '') + '" data-cid="' + esc(cat.id) + '"><span class="ic">' + esc(cat.icon || '•') + '</span>' +
-      '<div class="body"><div class="t1">' + esc(cat.name) + '</div>' +
-      (kindTag || otTag ? '<div class="t2">' + kindTag + otTag + '</div>' : '') + '</div><span class="menu-chev">›</span></div>';
+    return (kindTag || otTag) ? '<div class="t2">' + kindTag + otTag + '</div>' : '';
   };
+  const catTreeRow = (cat, lvl) => '<div class="tree-row ' + lvl + '" data-cid="' + esc(cat.id) + '"><span class="ic">' + esc(cat.icon || '•') + '</span>' +
+    '<div class="body"><div class="t1">' + esc(cat.name) + '</div>' + catTags(cat) + '</div><span class="chev">✎</span></div>';
   for (const g of GROUPS){
     const cats = liveCats().filter((cat) => cat.group === g.id);
     if (!cats.length && g.kind === 'system') continue;
-    html += '<div class="group-label row"><span class="grow">' + esc(g.name) + '</span>' +
-      (g.kind === 'system' ? '' : '<a data-gadd="' + g.id + '" style="cursor:pointer">＋ add</a>') + '</div>';
+    const gOpen = CATS_OPEN.has('g:' + g.id);
+    html += '<div class="tree-row grp" data-gtog="' + g.id + '"><span class="ic">' + (g.icon || '📂') + '</span>' +
+      '<div class="body"><div class="t1">' + esc(g.name) + '</div></div>' +
+      (g.kind === 'system' ? '' : '<span class="tree-act" data-gadd="' + g.id + '">＋</span>') +
+      '<span class="chev">' + (gOpen ? '▾' : '▸') + '</span></div>';
+    if (!gOpen) continue;
     const bySub = {}, direct = [];
     for (const cat of cats){ if (cat.sub){ (bySub[cat.sub] = bySub[cat.sub] || []).push(cat); } else direct.push(cat); }
-    for (const cat of direct) html += catRow(cat, false);
+    for (const cat of direct) html += catTreeRow(cat, 'tree-l1');
     for (const s in bySub){
-      html += '<div class="sub-head row"><span class="grow">' + esc(s) + '</span></div>';
-      for (const cat of bySub[s]) html += catRow(cat, true);
+      const sOpen = CATS_OPEN.has('sub:' + g.id + '|' + s);
+      html += '<div class="tree-row tree-l1" data-stog="' + esc(g.id + '|' + s) + '"><span class="ic">' + subIcon(g.id, s) + '</span>' +
+        '<div class="body"><div class="t1">' + esc(s) + '</div><div class="t2">' + bySub[s].length + ' categor' + (bySub[s].length === 1 ? 'y' : 'ies') + '</div></div>' +
+        '<span class="tree-act" data-sedit="' + esc(g.id + '|' + s) + '">✎</span>' +
+        '<span class="tree-act" data-sadd="' + esc(g.id + '|' + s) + '">＋</span>' +
+        '<span class="chev">' + (sOpen ? '▾' : '▸') + '</span></div>';
+      if (sOpen) for (const cat of bySub[s]) html += catTreeRow(cat, 'tree-l2');
     }
   }
   html += '</div>';
@@ -2788,71 +2922,18 @@ function renderCatsScreen(c){
     '<button class="btn btn-sm btn-block" data-x="radd" style="margin-top:8px">＋ Add rule</button></div>';
   c.innerHTML = html;
 
-  c.querySelectorAll('[data-gadd]').forEach((a2) => {
-    a2.onclick = () => {
-      const gid = a2.dataset.gadd;
-      const m = modal('New category',
-        '<label class="fld"><span>Name</span><input type="text" data-x="nm"></label>' +
-        '<label class="fld"><span>Icon (one emoji)</span><input type="text" data-x="ic" maxlength="4" placeholder="🧺"></label>' +
-        '<label class="fld"><span>Subcategory (optional)</span><input type="text" data-x="sub" list="dl-addsub" placeholder="e.g. Utilities"></label>' +
-        '<datalist id="dl-addsub">' + subsInGroup(gid).map((s) => '<option value="' + esc(s) + '"></option>').join('') + '</datalist>' +
-        '<button class="btn btn-primary btn-block" data-x="sv">Add</button>');
-      m.node.querySelector('[data-x=sv]').onclick = () => {
-        const name = m.node.querySelector('[data-x=nm]').value.trim();
-        if (!name) return;
-        const sv = m.node.querySelector('[data-x=sub]').value.trim();
-        const nc = { id: uid(), group: gid, name, icon: m.node.querySelector('[data-x=ic]').value.trim() || '•',
-          kind: gid === 'g-inc' ? 'income' : 'expense' };
-        if (sv) nc.sub = sv;
-        put('cats', nc);
-        m.close(); renderCatsScreen(c); toast('Category added');
-      };
-    };
+  const rerender = () => renderCatsScreen(c);
+  const toggle = (k) => { if (CATS_OPEN.has(k)) CATS_OPEN.delete(k); else CATS_OPEN.add(k); rerender(); };
+  c.querySelectorAll('[data-gtog]').forEach((row) => {
+    row.onclick = (e) => { if (e.target.closest('[data-gadd]')) return; toggle('g:' + row.dataset.gtog); };
   });
-  c.querySelectorAll('[data-cid]').forEach((n2) => {
-    n2.onclick = () => {
-      const cat = DATA.cats[n2.dataset.cid];
-      if (!cat) return;
-      const forcedOneTime = ONE_TIME_INCOME.has(cat.id) || (() => { const g = GROUPS.find((x) => x.id === cat.group); return !!(g && g.excludeFromBaseline); })();
-      const isSystem = cat.group === 'g-sys';
-      const curKind = cat.kind || 'expense';
-      const kindSel = isSystem ? '' :
-        '<label class="fld"><span>Type — decides how money here is counted</span><select data-x="kind">' +
-        [['expense', 'Expense (money out)'], ['income', 'Income (money in)'], ['invest', 'Investment (not spending)'], ['transfer', 'Transfer (ignored in totals)']]
-          .map(([v, lbl]) => '<option value="' + v + '"' + (curKind === v ? ' selected' : '') + '>' + lbl + '</option>').join('') +
-        '</select></label>';
-      const gName = (GROUPS.find((x) => x.id === cat.group) || {}).name || '';
-      const subSel = isSystem ? '' :
-        '<label class="fld"><span>Subcategory — groups it inside ' + esc(gName) + '</span>' +
-        '<input type="text" data-x="sub" list="dl-subs" value="' + esc(cat.sub || '') + '" placeholder="e.g. Utilities (optional)"></label>' +
-        '<datalist id="dl-subs">' + subsInGroup(cat.group).map((s) => '<option value="' + esc(s) + '"></option>').join('') + '</datalist>';
-      const m = modal('Edit category',
-        '<label class="fld"><span>Name</span><input type="text" data-x="nm" value="' + esc(cat.name) + '"></label>' +
-        '<label class="fld"><span>Icon</span><input type="text" data-x="ic" maxlength="4" value="' + esc(cat.icon || '') + '"></label>' +
-        kindSel + subSel +
-        '<label class="row" style="margin:0 0 12px"><input type="checkbox" data-x="ot" style="width:auto"' +
-          ((cat.oneTime || forcedOneTime) ? ' checked' : '') + (forcedOneTime ? ' disabled' : '') + '> ' +
-          '<span class="muted">One-time — exclude from future forecasts &amp; the baseline' + (forcedOneTime ? ' (always, for this group)' : '') + '</span></label>' +
-        '<button class="btn btn-block" data-x="merge" style="margin-bottom:8px">🔀 Merge into another category…</button>' +
-        '<div class="row"><button class="btn grow" data-x="sv">Save</button>' +
-        '<button class="btn btn-danger grow" data-x="ar">Archive</button></div>');
-      m.node.querySelector('[data-x=sv]').onclick = () => {
-        const name = m.node.querySelector('[data-x=nm]').value.trim();
-        if (!name) return;
-        cat.name = name; cat.icon = m.node.querySelector('[data-x=ic]').value.trim() || '•';
-        if (!isSystem) cat.kind = m.node.querySelector('[data-x=kind]').value;
-        if (!isSystem){ const sv = m.node.querySelector('[data-x=sub]').value.trim(); if (sv) cat.sub = sv; else delete cat.sub; }
-        if (!forcedOneTime) cat.oneTime = m.node.querySelector('[data-x=ot]').checked;
-        put('cats', cat); m.close(); renderCatsScreen(c); renderCurrent();
-        toast('Category updated');
-      };
-      m.node.querySelector('[data-x=merge]').onclick = () => { m.close(); openMergePicker(cat.id, () => renderCatsScreen(c)); };
-      m.node.querySelector('[data-x=ar]').onclick = async () => {
-        if (!(await confirmDlg('Archive “' + cat.name + '”? Existing transactions keep it; it just leaves the pickers.', 'Archive'))) return;
-        softDelete('cats', cat.id); m.close(); renderCatsScreen(c);
-      };
-    };
+  c.querySelectorAll('[data-stog]').forEach((row) => {
+    row.onclick = (e) => { if (e.target.closest('[data-sedit],[data-sadd]')) return; toggle('sub:' + row.dataset.stog); };
   });
+  c.querySelectorAll('[data-gadd]').forEach((a2) => { a2.onclick = (e) => { e.stopPropagation(); openAddCatModal(a2.dataset.gadd, null, rerender); }; });
+  c.querySelectorAll('[data-sadd]').forEach((a2) => { a2.onclick = (e) => { e.stopPropagation(); const b = a2.dataset.sadd.indexOf('|'); openAddCatModal(a2.dataset.sadd.slice(0, b), a2.dataset.sadd.slice(b + 1), rerender); }; });
+  c.querySelectorAll('[data-sedit]').forEach((a2) => { a2.onclick = (e) => { e.stopPropagation(); openSubEditor(a2.dataset.sedit, rerender); }; });
+  c.querySelectorAll('[data-cid]').forEach((n2) => { n2.onclick = () => openCatEditor(n2.dataset.cid, rerender); });
   c.querySelectorAll('[data-rdel]').forEach((b) => {
     b.onclick = () => { softDelete('rules', b.dataset.rdel); renderCatsScreen(c); toast('Rule removed'); };
   });
