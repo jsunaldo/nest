@@ -173,6 +173,9 @@ table.map-tbl th{color:var(--dim); font-weight:600}
   -webkit-overflow-scrolling:touch; scrollbar-width:none}
 .month-strip::-webkit-scrollbar{display:none}
 .month-strip .chip{flex-shrink:0; white-space:nowrap}
+.filter-selects{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px}
+.filter-selects select{flex:1 1 30%; min-width:104px; padding:8px 10px; font-size:13px; width:auto}
+.filter-selects select.act{border-color:var(--accent)}
 .tag-x{font-size:11px; opacity:.7; margin-left:2px}
 input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 .rule-pat{font-family:ui-monospace,Menlo,monospace; font-size:12px; background:var(--bg);
@@ -216,7 +219,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v3.1'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v3.2'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1235,7 +1238,8 @@ let LAST_IMPORT_ACCT = null;
 const REVIEW_SKIP = new Set();
 const REVIEW = { mode: 'sort', month: null, acct: null }; // Review tab: auto-sort queue vs manual verify pass
 let HOME_BL = 'overall'; // Bottom Line lens: overall | recurring | oneoff
-const ACT = { q: '', acct: null, cat: null, month: null, status: null, limit: 200, select: false, sel: new Set() };
+const ACT = { q: '', acct: null, cat: null, year: null, mo: null, status: null, limit: 200, select: false, sel: new Set() };
+function actSetMonth(ym){ if (ym){ ACT.year = ym.slice(0, 4); ACT.mo = ym.slice(5, 7); } else { ACT.year = null; ACT.mo = null; } }
 const TRENDS_SEL = { month: null };
 
 /* ---- shared helpers ---- */
@@ -1773,7 +1777,7 @@ function renderHome(){
   c.querySelectorAll('[data-cat]').forEach((n2) => {
     n2.onclick = () => {
       if (n2.dataset.cat === '__uncat'){ showTab('review'); return; }
-      ACT.cat = n2.dataset.cat; ACT.month = null; showTab('activity');
+      ACT.cat = n2.dataset.cat; actSetMonth(null); showTab('activity');
     };
   });
   c.querySelectorAll('[data-ym]').forEach((n2) => {
@@ -1860,13 +1864,13 @@ function renderMonthScreen(c){
   c.querySelector('[data-x=prev]').onclick = () => { UI.month = shiftYM(ym, -1); renderMonthScreen(c); };
   c.querySelector('[data-x=next]').onclick = () => { UI.month = shiftYM(ym, 1); renderMonthScreen(c); };
   const on = (sel, fn) => { const n2 = c.querySelector(sel); if (n2) n2.onclick = fn; };
-  on('[data-x=alla]', () => { ACT.month = ym; ACT.cat = null; showTab('activity'); });
+  on('[data-x=alla]', () => { actSetMonth(ym); ACT.cat = null; showTab('activity'); });
   on('[data-x=gob]', () => openScreen('Budgets & Baseline', renderBudgetsScreen));
   c.querySelectorAll('[data-aidm]').forEach((n2) => { n2.onclick = () => openAccountEditor(n2.dataset.aidm, () => renderMonthScreen(c)); });
   c.querySelectorAll('.list-item[data-cat]').forEach((n2) => {
     n2.onclick = () => {
       if (n2.dataset.cat === '__uncat'){ showTab('review'); return; }
-      ACT.cat = n2.dataset.cat; ACT.month = ym; showTab('activity');
+      ACT.cat = n2.dataset.cat; actSetMonth(ym); showTab('activity');
     };
   });
   c.querySelectorAll('[data-m]').forEach((r2) => {
@@ -2065,7 +2069,8 @@ function actFiltered(){
   const q = ACT.q.trim().toUpperCase();
   return liveTxns().filter((t) => {
     if (ACT.acct && t.acct !== ACT.acct) return false;
-    if (ACT.month && ymOf(t.date) !== ACT.month) return false;
+    if (ACT.year && ymOf(t.date).slice(0, 4) !== ACT.year) return false;
+    if (ACT.mo && ymOf(t.date).slice(5, 7) !== ACT.mo) return false;
     if (ACT.status && t.status !== ACT.status) return false;
     if (ACT.cat){
       if (!effParts(t).some((p) => (p.cat || '__uncat') === ACT.cat)) return false;
@@ -2074,81 +2079,45 @@ function actFiltered(){
     return true;
   }).sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0));
 }
-// Every month that actually has data, newest first — the source for month
-// pickers everywhere (native <input type="month"> is NOT supported on desktop
-// browsers, so we never use it).
+// Years present in the data, newest first.
+function dataYears(){
+  return Array.from(new Set(liveTxns().map((t) => ymOf(t.date).slice(0, 4)))).sort().reverse();
+}
+// Every month that has data, newest first (used by Verify mode + baseline picker).
 function dataMonths(){
   return Array.from(new Set(liveTxns().map((t) => ymOf(t.date)))).sort().reverse();
 }
-// Filter sheet: all Activity filters in one place instead of chip gymnastics.
-function openActFilters(){
-  const accts = liveAccounts();
-  let cat = ACT.cat, status = ACT.status || '';
-  const catTxt = (id) => id ? (id === '__uncat' ? '❓ Uncategorized' : catLabel(id).icon + ' ' + catLabel(id).name) : 'All categories';
-  const m = modal('Filter activity',
-    '<label class="fld"><span>Account</span><select data-x="fa"><option value="">All accounts</option>' +
-      accts.map((a) => '<option value="' + esc(a.id) + '"' + (ACT.acct === a.id ? ' selected' : '') + '>' + esc(a.name) + '</option>').join('') + '</select></label>' +
-    '<label class="fld"><span>Category</span></label>' +
-    '<button class="btn btn-block" data-x="fc" style="text-align:left;margin-bottom:10px">' + esc(catTxt(cat)) + '</button>' +
-    '<label class="fld"><span>Month</span><select data-x="fm"><option value="">All months</option>' +
-      dataMonths().map((ym) => '<option value="' + ym + '"' + (ACT.month === ym ? ' selected' : '') + '>' + fmtMonth(ym) + '</option>').join('') + '</select></label>' +
-    '<label class="fld"><span>Status</span></label>' +
-    '<div class="seg" style="margin-bottom:14px">' +
-      '<button data-fs="" class="' + (!status ? 'on' : '') + '">All</button>' +
-      '<button data-fs="review" class="' + (status === 'review' ? 'on' : '') + '">Needs review</button>' +
-      '<button data-fs="excluded" class="' + (status === 'excluded' ? 'on' : '') + '">Excluded</button></div>' +
-    '<div class="row"><button class="btn grow" data-x="reset">Reset all</button>' +
-    '<button class="btn btn-primary grow" data-x="apply">Apply</button></div>');
-  const q2 = (s) => m.node.querySelector(s);
-  q2('[data-x=fc]').onclick = async () => {
-    const picked = await openCatPicker({ showSystem: true, allowAll: true });
-    if (picked){ cat = picked === '__all' ? null : picked; q2('[data-x=fc]').textContent = catTxt(cat); }
-  };
-  m.node.querySelectorAll('[data-fs]').forEach((b) => {
-    b.onclick = () => {
-      status = b.dataset.fs;
-      m.node.querySelectorAll('[data-fs]').forEach((x) => x.classList.toggle('on', x === b));
-    };
-  });
-  q2('[data-x=reset]').onclick = () => {
-    ACT.acct = ACT.cat = ACT.month = ACT.status = null; ACT.limit = 200;
-    m.close(); renderActivity();
-  };
-  q2('[data-x=apply]').onclick = () => {
-    ACT.acct = q2('[data-x=fa]').value || null;
-    ACT.cat = cat;
-    ACT.month = q2('[data-x=fm]').value || null;
-    ACT.status = status || null;
-    ACT.limit = 200;
-    m.close(); renderActivity();
-  };
-}
 function renderActivity(){
   const c = $('#view-activity');
-  const catName = ACT.cat ? (ACT.cat === '__uncat' ? 'Uncategorized' : catLabel(ACT.cat).name) : null;
-  // Month = the ledger's primary axis: always visible, one tap, no form field.
-  const months = dataMonths();
-  const nFilters = (ACT.acct ? 1 : 0) + (ACT.cat ? 1 : 0) + (ACT.status ? 1 : 0);
+  const sel = (x, val, opts, cls) => '<select data-x="' + x + '"' + (cls ? ' class="' + cls + '"' : '') + '>' + opts + '</select>';
+  const opt = (v, label, on) => '<option value="' + esc(v) + '"' + (on ? ' selected' : '') + '>' + esc(label) + '</option>';
+  const years = dataYears();
+  const yearOpts = opt('', 'All years', !ACT.year) + years.map((y) => opt(y, y, ACT.year === y)).join('');
+  const moOpts = opt('', 'All months', !ACT.mo) + MONTHS.map((nm, i) => opt(String(i + 1).padStart(2, '0'), nm, ACT.mo === String(i + 1).padStart(2, '0'))).join('');
+  let catOpts = opt('', 'All categories', !ACT.cat) + opt('__uncat', '❓ Uncategorized', ACT.cat === '__uncat');
+  for (const g of GROUPS){
+    const cats = liveCats().filter((cat) => cat.group === g.id);
+    if (!cats.length) continue;
+    catOpts += '<optgroup label="' + esc(g.name) + '">' + cats.map((cat) => opt(cat.id, cat.name, ACT.cat === cat.id)).join('') + '</optgroup>';
+  }
+  const accts = liveAccounts();
+  const accOpts = opt('', 'All accounts', !ACT.acct) + accts.map((a) => opt(a.id, a.name, ACT.acct === a.id)).join('');
+  const stOpts = opt('', 'Any status', !ACT.status) + opt('review', 'Needs review', ACT.status === 'review') + opt('excluded', 'Excluded', ACT.status === 'excluded');
+  const anyFilter = ACT.year || ACT.mo || ACT.cat || ACT.acct || ACT.status;
+
   let html =
-    '<div class="row" style="margin-bottom:10px">' +
+    '<div class="row" style="margin-bottom:8px">' +
     '<input type="text" data-x="q" placeholder="Search merchants & notes…" value="' + esc(ACT.q) + '" class="grow">' +
-    '<button class="btn btn-sm' + (nFilters ? ' btn-primary' : '') + '" data-x="fopen">Filter' + (nFilters ? ' · ' + nFilters : '') + '</button>' +
-    '<button class="btn btn-sm" data-x="fsel">' + (ACT.select ? 'Done' : 'Select') + '</button></div>';
-  if (months.length){
-    html += '<div class="month-strip">' +
-      '<span class="chip' + (!ACT.month ? ' on' : '') + '" data-mstrip="">All</span>' +
-      months.map((ym) => '<span class="chip' + (ACT.month === ym ? ' on' : '') + '" data-mstrip="' + ym + '">' + fmtMonth(ym) + '</span>').join('') +
-      '</div>';
-  }
-  if (nFilters){
-    html += '<div class="filter-row">' +
-      (ACT.acct ? '<span class="chip on" data-clear="acct">' + esc(accountName(ACT.acct)) + '<span class="tag-x">×</span></span>' : '') +
-      (ACT.cat ? '<span class="chip on" data-clear="cat">' + esc(catName) + '<span class="tag-x">×</span></span>' : '') +
-      (ACT.status ? '<span class="chip on" data-clear="status">' + (ACT.status === 'review' ? 'Needs review' : 'Excluded') + '<span class="tag-x">×</span></span>' : '') +
-      (nFilters > 1 ? '<span class="chip" data-clear="__all">Clear all</span>' : '') +
-      '</div>';
-  }
-  html += '<div data-x="list"></div>';
+    '<button class="btn btn-sm" data-x="fsel">' + (ACT.select ? 'Done' : 'Select') + '</button></div>' +
+    '<div class="filter-selects">' +
+      sel('fy', ACT.year, yearOpts, ACT.year ? 'act' : '') +
+      sel('fmo', ACT.mo, moOpts, ACT.mo ? 'act' : '') +
+      sel('fcat', ACT.cat, catOpts, ACT.cat ? 'act' : '') +
+      (accts.length > 1 ? sel('facc', ACT.acct, accOpts, ACT.acct ? 'act' : '') : '') +
+      sel('fst', ACT.status, stOpts, ACT.status ? 'act' : '') +
+    '</div>' +
+    (anyFilter ? '<div style="margin:-4px 0 10px"><a data-x="fclear" style="cursor:pointer;font-size:12px">Clear filters</a></div>' : '') +
+    '<div data-x="list"></div>';
   c.innerHTML = html;
   const q = (s) => c.querySelector(s);
 
@@ -2227,20 +2196,11 @@ function renderActivity(){
     clearTimeout(qTimer);
     qTimer = setTimeout(() => { ACT.q = e.target.value; ACT.limit = 200; drawList(); }, 200);
   };
-  q('[data-x=fopen]').onclick = () => openActFilters();
   q('[data-x=fsel]').onclick = () => { ACT.select = !ACT.select; if (!ACT.select) ACT.sel.clear(); renderActivity(); };
-  c.querySelectorAll('[data-mstrip]').forEach((ch) => {
-    ch.onclick = () => { ACT.month = ch.dataset.mstrip || null; ACT.limit = 200; renderActivity(); };
-  });
-  const onChip = c.querySelector('.month-strip .chip.on');
-  if (onChip && onChip.scrollIntoView) onChip.scrollIntoView({ inline: 'center', block: 'nearest' });
-  c.querySelectorAll('[data-clear]').forEach((ch) => {
-    ch.onclick = () => {
-      if (ch.dataset.clear === '__all') ACT.acct = ACT.cat = ACT.month = ACT.status = null;
-      else ACT[ch.dataset.clear] = null;
-      renderActivity();
-    };
-  });
+  const bindSel = (x, key) => { const s = q('[data-x=' + x + ']'); if (s) s.onchange = () => { ACT[key] = s.value || null; ACT.limit = 200; renderActivity(); }; };
+  bindSel('fy', 'year'); bindSel('fmo', 'mo'); bindSel('fcat', 'cat'); bindSel('facc', 'acct'); bindSel('fst', 'status');
+  const fclear = q('[data-x=fclear]');
+  if (fclear) fclear.onclick = () => { ACT.year = ACT.mo = ACT.cat = ACT.acct = ACT.status = null; ACT.limit = 200; renderActivity(); };
   drawList();
 }
 /* ---- §Trends ---- */
