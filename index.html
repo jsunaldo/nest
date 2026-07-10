@@ -216,7 +216,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v2.4'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v2.5'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -2392,9 +2392,16 @@ function renderCatsScreen(c){
     const cats = liveCats().filter((cat) => cat.group === g.id);
     html += '<div class="group-label row"><span class="grow">' + esc(g.name) + '</span>' +
       (g.kind === 'system' ? '' : '<a data-gadd="' + g.id + '" style="cursor:pointer">＋ add</a>') + '</div>';
-    for (const cat of cats)
+    for (const cat of cats){
+      const k = cat.kind || 'expense';
+      const kindTag = k === 'income' ? '<span class="tiny" style="color:var(--status-good)">income</span>'
+        : k === 'invest' ? '<span class="tiny" style="color:var(--blue)">investment</span>'
+        : k === 'transfer' ? '<span class="tiny" style="color:var(--dim)">transfer</span>' : '';
+      const otTag = catExcludedFromEstimates(cat) ? '<span class="tiny" style="color:var(--faint)"> · one-time</span>' : '';
       html += '<div class="list-item" data-cid="' + esc(cat.id) + '"><span class="ic">' + esc(cat.icon || '•') + '</span>' +
-        '<div class="body"><div class="t1">' + esc(cat.name) + '</div></div><span class="menu-chev">›</span></div>';
+        '<div class="body"><div class="t1">' + esc(cat.name) + '</div>' +
+        (kindTag || otTag ? '<div class="t2">' + kindTag + otTag + '</div>' : '') + '</div><span class="menu-chev">›</span></div>';
+    }
   }
   html += '</div>';
   const rules = liveRules().sort((a, b) => (a.pattern < b.pattern ? -1 : 1));
@@ -2428,9 +2435,17 @@ function renderCatsScreen(c){
       const cat = DATA.cats[n2.dataset.cid];
       if (!cat) return;
       const forcedOneTime = ONE_TIME_INCOME.has(cat.id) || (() => { const g = GROUPS.find((x) => x.id === cat.group); return !!(g && g.excludeFromBaseline); })();
+      const isSystem = cat.group === 'g-sys';
+      const curKind = cat.kind || 'expense';
+      const kindSel = isSystem ? '' :
+        '<label class="fld"><span>Type — decides how money here is counted</span><select data-x="kind">' +
+        [['expense', 'Expense (money out)'], ['income', 'Income (money in)'], ['invest', 'Investment (not spending)'], ['transfer', 'Transfer (ignored in totals)']]
+          .map(([v, lbl]) => '<option value="' + v + '"' + (curKind === v ? ' selected' : '') + '>' + lbl + '</option>').join('') +
+        '</select></label>';
       const m = modal('Edit category',
         '<label class="fld"><span>Name</span><input type="text" data-x="nm" value="' + esc(cat.name) + '"></label>' +
         '<label class="fld"><span>Icon</span><input type="text" data-x="ic" maxlength="4" value="' + esc(cat.icon || '') + '"></label>' +
+        kindSel +
         '<label class="row" style="margin:0 0 12px"><input type="checkbox" data-x="ot" style="width:auto"' +
           ((cat.oneTime || forcedOneTime) ? ' checked' : '') + (forcedOneTime ? ' disabled' : '') + '> ' +
           '<span class="muted">One-time — exclude from future forecasts &amp; the baseline' + (forcedOneTime ? ' (always, for this group)' : '') + '</span></label>' +
@@ -2440,8 +2455,10 @@ function renderCatsScreen(c){
         const name = m.node.querySelector('[data-x=nm]').value.trim();
         if (!name) return;
         cat.name = name; cat.icon = m.node.querySelector('[data-x=ic]').value.trim() || '•';
+        if (!isSystem) cat.kind = m.node.querySelector('[data-x=kind]').value;
         if (!forcedOneTime) cat.oneTime = m.node.querySelector('[data-x=ot]').checked;
         put('cats', cat); m.close(); renderCatsScreen(c); renderCurrent();
+        toast('Category updated');
       };
       m.node.querySelector('[data-x=ar]').onclick = async () => {
         if (!(await confirmDlg('Archive “' + cat.name + '”? Existing transactions keep it; it just leaves the pickers.', 'Archive'))) return;
@@ -2544,8 +2561,10 @@ function renderHealthScreen(c){
     html += '<div class="card" style="border-color:var(--status-crit)"><h3>⚠️ Math-breaking anomalies</h3>' +
       (negMonths.length ? '<p style="margin:0 0 8px">' + negMonths.map(fmtMonth).join(', ') +
         (negMonths.length > 1 ? ' have' : ' has') + ' <b>negative total spending</b>.</p>' : '') +
-      (susp.length ? '<p class="muted" style="margin:0 0 8px">These show as <b>money IN</b> but sit in a <b>spending</b> category, so each subtracts from that month. ' +
-        'If it truly is an inflow (a gift, refund, transfer), recategorize it. If it was a real expense the bank imported backwards, open it and tap <b>⇄ Flip</b>. Small refunds are fine. Tap to fix:</p>' +
+      (susp.length ? '<p class="muted" style="margin:0 0 8px">These show as <b>money IN</b> but sit in an <b>Expense-type</b> category, so each subtracts from that month. Fixes: ' +
+        '(1) if the whole category is really income — e.g. Seed Money — change its <b>Type</b> to Income in Categories &amp; Rules (fixes all at once); ' +
+        '(2) if just this item is an inflow, recategorize it; ' +
+        '(3) if it was an expense imported backwards, open it and tap <b>⇄ Flip</b>. Small refunds are fine. Tap any to fix:</p>' +
         susp.slice(0, 12).map((t) => txnRowHTML(t)).join('') : '') +
       '</div>';
   }
