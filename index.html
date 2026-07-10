@@ -122,6 +122,9 @@ label.fld span{display:block; font-size:12px; color:var(--dim); margin-bottom:4p
   width:100%; max-width:640px; max-height:86vh; overflow-y:auto; padding:18px 18px calc(18px + env(safe-area-inset-bottom))}
 @media(min-width:600px){#modal-root .sheet{border-radius:20px}}
 #modal-root .sheet h3{font-size:17px; margin-bottom:14px; color:var(--text); text-transform:none; letter-spacing:0}
+.modal-closebar{position:sticky; top:0; z-index:8; margin:-18px -18px 10px -18px; padding:12px 18px 10px;
+  background:var(--card); border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between}
+.modal-closebar b{font-size:15px}
 #toast-root{position:fixed; bottom:calc(var(--nav-h) + 10px); left:0; right:0; z-index:70;
   display:flex; flex-direction:column; align-items:center; gap:8px; pointer-events:none}
 .toast{background:var(--card2); border:1px solid var(--line); color:var(--text); border-radius:12px;
@@ -247,7 +250,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v3.9'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v4.0'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1347,7 +1350,43 @@ function accountBalanceAt(acct, asOf){
   }
   return bal;
 }
-const ACCT_TYPES = [['checking', 'Checking'], ['savings', 'Savings'], ['investment', 'Investment'], ['credit', 'Credit card']];
+const ACCT_TYPES = [['checking', 'Checking'], ['savings', 'Savings'], ['investment', 'Investment'], ['btc', 'Bitcoin Investment'], ['credit', 'Credit card']];
+// --- Bitcoin: satoshis on txns (t.btc), live spot price cached ~5 min. ---
+let BTC_PRICE = null; // { usd: cents, at: ms }
+let BTC_FETCHING = false;
+try { BTC_PRICE = JSON.parse(localStorage.getItem('nest.btc')); } catch (e) {}
+// Resolves { changed } — true ONLY when a new price was just fetched, so callers
+// can re-render exactly once (never in a render→price→render loop).
+async function refreshBtcPrice(force){
+  if ((!force && BTC_PRICE && Date.now() - BTC_PRICE.at < 300000) || BTC_FETCHING) return { changed: false };
+  BTC_FETCHING = true;
+  let changed = false;
+  try {
+    const ctrl = new AbortController();
+    const to = setTimeout(() => ctrl.abort(), 6000); // never hang on a slow/blocked network
+    const res = await fetch('https://api.coinbase.com/v2/prices/BTC-USD/spot', { signal: ctrl.signal });
+    clearTimeout(to);
+    const j = await res.json();
+    const usd = Math.round(parseFloat(j.data.amount) * 100);
+    if (usd > 0){ BTC_PRICE = { usd, at: Date.now() }; localStorage.setItem('nest.btc', JSON.stringify(BTC_PRICE)); changed = true; }
+  } catch (e) {} finally { BTC_FETCHING = false; }
+  return { changed };
+}
+// Holdings + cost basis for a Bitcoin account, from its transactions (t.btc = sats).
+function btcStats(acctId){
+  let sats = 0, invested = 0;
+  for (const id in DATA.txns){
+    const t = DATA.txns[id];
+    if (t.deleted || t.acct !== acctId) continue;
+    if (t.btc) sats += t.btc;
+    invested += t.amt; // net cash put in
+  }
+  const btc = sats / 1e8;
+  const avgCost = sats > 0 ? Math.round(invested / btc) : 0; // cents per whole BTC
+  const value = (BTC_PRICE && sats > 0) ? Math.round(btc * BTC_PRICE.usd) : null;
+  return { sats, btc, invested, avgCost, value, price: BTC_PRICE ? BTC_PRICE.usd : null };
+}
+const fmtBtc = (sats) => (sats / 1e8).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 8 }) + ' ₿';
 function acctTypeLabel(t){ const e = ACCT_TYPES.find((x) => x[0] === t); return e ? e[1] : (t || ''); }
 function acctOptions(sel){
   const list = liveAccounts().slice();
@@ -1432,10 +1471,14 @@ function openAddTxn(defaultAcct){
     '<label class="fld grow"><span>Date</span><input type="date" data-x="date" value="' + todayISO + '"></label></div>' +
     '<label class="fld"><span>Description</span><input type="text" data-x="desc" placeholder="e.g. Costco, rent, paycheck"></label>' +
     '<label class="fld"><span>Account</span><select data-x="acct">' + acctOptions(defaultAcct || accts[0].id) + '</select></label>' +
+    '<label class="fld" data-x="btcwrap" style="display:none"><span>Bitcoin acquired (₿)</span><input type="number" step="0.00000001" min="0" inputmode="decimal" data-x="btc" placeholder="0.05"></label>' +
     '<button class="btn btn-block" data-x="cat" style="text-align:left;margin-bottom:10px">🏷️ Category — tap to pick (optional)</button>' +
     '<label class="fld"><span>Note (optional)</span><input type="text" data-x="note"></label>' +
     '<button class="btn btn-primary btn-block" data-x="save">Add transaction</button>');
   const q = (s) => m.node.querySelector(s);
+  const isBtc = () => (DATA.accounts[q('[data-x=acct]').value] || {}).type === 'btc';
+  const syncBtc = () => { q('[data-x=btcwrap]').style.display = isBtc() ? 'block' : 'none'; };
+  q('[data-x=acct]').onchange = syncBtc; syncBtc();
   m.node.querySelectorAll('[data-d]').forEach((b) => { b.onclick = () => { dir = b.dataset.d; m.node.querySelectorAll('[data-d]').forEach((x) => x.classList.toggle('on', x === b)); }; });
   q('[data-x=cat]').onclick = async () => {
     const picked = await openCatPicker({ showSystem: true });
@@ -1449,10 +1492,15 @@ function openAddTxn(defaultAcct){
     if (!desc){ toast('Enter a description'); return; }
     if (!date){ toast('Enter a valid date'); return; }
     const amt = dir === 'out' ? -cents : cents;
-    put('txns', { id: uid(), acct: q('[data-x=acct]').value, date, amt,
+    const t = { id: uid(), acct: q('[data-x=acct]').value, date, amt,
       mraw: desc, m: normMerchant(desc), cat: cat || null, splits: null,
       note: q('[data-x=note]').value.trim(), tags: [], status: cat ? 'ok' : 'review',
-      fp: 'manual|' + uid(), batch: 'manual', src: 'manual' });
+      fp: 'manual|' + uid(), batch: 'manual', src: 'manual' };
+    if (isBtc()){
+      const btc = parseFloat(q('[data-x=btc]').value);
+      if (btc > 0) t.btc = (dir === 'out' ? -1 : 1) * Math.round(btc * 1e8); // sats, signed like the cash
+    }
+    put('txns', t);
     m.close(); renderCurrent(); toast('Transaction added');
   };
 }
@@ -1721,38 +1769,55 @@ function importOneFile(a){
   });
 }
 
-// Grouped category breakdown (income first, then each expense GROUP with its own
-// subtotal header, then invested). spendMap/incomeMap are positive cents; invest
-// is net invested. Rows carry data-cat for tap-through. Reused on Home + months.
-function groupedCatHTML(spendMap, incomeMap, investMap){
-  const hdr = (label, amtStr, color) => '<div class="group-label row" style="margin-top:12px"><span class="grow">' + label + '</span><span style="color:' + (color || 'var(--dim)') + '">' + amtStr + '</span></div>';
-  const subHdr = (label, amtStr) => '<div class="sub-head row"><span class="grow">' + esc(label) + '</span><span>−' + fmt$(amtStr) + '</span></div>';
-  const row = (cid, amtStr, color, indent) => { const cl = catLabel(cid); return '<div class="list-item' + (indent ? ' sub-item' : '') + '" data-cat="' + esc(cid) + '"><span class="ic">' + cl.icon + '</span><div class="body"><div class="t1">' + esc(cl.name) + '</div></div><span class="amt" style="color:' + color + '">' + amtStr + '</span></div>'; };
+const BREAKDOWN_OPEN = new Set(); // collapsible breakdown tree: '<pfx>:g:<gid>' and '<pfx>:sub:<gid>|<sub>'
+// Collapsible category-breakdown tree (Group ▸ direct categories + Subcategories ▸
+// their categories, then Invested). Each group/subcategory row rolls up a subtotal
+// and toggles (data-btog); each category leaf carries data-cat for tap-through.
+function groupedCatHTML(spendMap, incomeMap, investMap, opts){
+  opts = opts || {}; const pfx = opts.pfx || 'b';
+  const grpRow = (icon, name, amtStr, color, tog, open) =>
+    '<div class="tree-row grp" data-btog="' + esc(tog) + '" style="cursor:pointer"><span class="ic">' + icon + '</span>' +
+    '<div class="body"><div class="t1">' + esc(name) + '</div></div><span class="amt" style="color:' + color + '">' + amtStr + '</span>' +
+    '<span class="chev">' + (open ? '▾' : '▸') + '</span></div>';
+  const subRow = (gid, s, amtStr, open) =>
+    '<div class="tree-row tree-l1" data-btog="' + esc(pfx + ':sub:' + gid + '|' + s) + '" style="cursor:pointer"><span class="ic">' + subIcon(gid, s) + '</span>' +
+    '<div class="body"><div class="t1">' + esc(s) + '</div></div><span class="amt">' + amtStr + '</span>' +
+    '<span class="chev">' + (open ? '▾' : '▸') + '</span></div>';
+  const catLeaf = (cid, amtStr, color, lvl) => { const cl = catLabel(cid); return '<div class="tree-row ' + lvl + '" data-cat="' + esc(cid) + '"><span class="ic">' + cl.icon + '</span><div class="body"><div class="t1">' + esc(cl.name) + '</div></div><span class="amt" style="color:' + color + '"><span class="chev"></span>' + amtStr + '</span></div>'; };
   let html = '';
-  const inc = Object.keys(incomeMap || {}).filter((c) => incomeMap[c] > 0).sort((a, b) => incomeMap[b] - incomeMap[a]);
-  if (inc.length){ const t = inc.reduce((s, c) => s + incomeMap[c], 0);
-    html += hdr('💰 Money in', '+' + fmt$(t), 'var(--status-good)') + inc.map((c) => row(c, '+' + fmt$(incomeMap[c]), 'var(--status-good)')).join(''); }
   for (const g of GROUPS){
-    if (g.kind === 'income' || g.kind === 'system') continue;
-    const cats = Object.keys(spendMap).filter((c) => spendMap[c] > 0 && DATA.cats[c] && DATA.cats[c].group === g.id);
+    if (g.kind === 'system') continue;
+    const income = g.kind === 'income';
+    const src = income ? (incomeMap || {}) : spendMap;
+    const sign = income ? '+' : '−', gcolor = income ? 'var(--status-good)' : 'var(--dim)', lcolor = income ? 'var(--status-good)' : 'var(--text)';
+    const cats = Object.keys(src).filter((c) => src[c] > 0 && DATA.cats[c] && DATA.cats[c].group === g.id);
     if (!cats.length) continue;
-    const t = cats.reduce((s, c) => s + spendMap[c], 0);
-    html += hdr(g.name, '−' + fmt$(t));
-    // Build ordered items: direct categories + subcategory bundles, sorted by amount.
+    const gTotal = cats.reduce((s, c) => s + src[c], 0);
+    const gkey = pfx + ':g:' + g.id, gOpen = BREAKDOWN_OPEN.has(gkey);
+    html += grpRow(g.icon || '📂', g.name, sign + fmt$(gTotal), gcolor, gkey, gOpen);
+    if (!gOpen) continue;
     const bySub = {}, direct = [];
     for (const c of cats){ const s = DATA.cats[c].sub; if (s){ (bySub[s] = bySub[s] || []).push(c); } else direct.push(c); }
-    const items = direct.map((c) => ({ kind: 'cat', cid: c, amt: spendMap[c] }));
-    for (const s in bySub) items.push({ kind: 'sub', name: s, cats: bySub[s], amt: bySub[s].reduce((sum, c) => sum + spendMap[c], 0) });
-    items.sort((a, b) => b.amt - a.amt);
+    const items = direct.map((c) => ({ type: 'cat', cid: c, amt: src[c] }))
+      .concat(Object.keys(bySub).map((s) => ({ type: 'sub', s, cats: bySub[s], amt: bySub[s].reduce((x, c) => x + src[c], 0) })))
+      .sort((a, b) => b.amt - a.amt);
     for (const it of items){
-      if (it.kind === 'cat') html += row(it.cid, '−' + fmt$(it.amt), 'var(--text)');
-      else html += subHdr(it.name, it.amt) + it.cats.sort((a, b) => spendMap[b] - spendMap[a]).map((c) => row(c, '−' + fmt$(spendMap[c]), 'var(--text)', true)).join('');
+      if (it.type === 'cat') html += catLeaf(it.cid, sign + fmt$(it.amt), lcolor, 'tree-l1');
+      else {
+        const sOpen = BREAKDOWN_OPEN.has(pfx + ':sub:' + g.id + '|' + it.s);
+        html += subRow(g.id, it.s, sign + fmt$(it.amt), sOpen);
+        if (sOpen) for (const c of it.cats.slice().sort((a, b) => src[b] - src[a])) html += catLeaf(c, sign + fmt$(src[c]), lcolor, 'tree-l2');
+      }
     }
   }
-  if (spendMap.__uncat > 0) html += hdr('❓ Needs review', '−' + fmt$(spendMap.__uncat), 'var(--status-warn)') + row('__uncat', '−' + fmt$(spendMap.__uncat), 'var(--text)');
+  if (spendMap.__uncat > 0) html += catLeaf('__uncat', '−' + fmt$(spendMap.__uncat), 'var(--status-warn)', 'grp');
   const inv = Object.keys(investMap || {}).filter((c) => investMap[c] !== 0).sort((a, b) => Math.abs(investMap[b]) - Math.abs(investMap[a]));
-  if (inv.length){ const t = inv.reduce((s, c) => s + investMap[c], 0);
-    html += hdr('📈 Invested', fmt$(t), 'var(--blue)') + inv.map((c) => row(c, fmt$(investMap[c]) + ' 📈', 'var(--blue)')).join(''); }
+  if (inv.length){
+    const t = inv.reduce((s, c) => s + investMap[c], 0);
+    const gkey = pfx + ':g:invest', gOpen = BREAKDOWN_OPEN.has(gkey);
+    html += grpRow('📈', 'Invested', fmt$(t), 'var(--blue)', gkey, gOpen);
+    if (gOpen) for (const c of inv) html += catLeaf(c, fmt$(investMap[c]), 'var(--blue)', 'tree-l1');
+  }
   return html;
 }
 
@@ -1790,16 +1855,19 @@ function renderHome(){
   {
     const accts = liveAccounts();
     if (accts.length){
+      if (accts.some((a) => a.type === 'btc')) refreshBtcPrice().then((r) => { if (r.changed && CURRENT_TAB === "home") renderHome(); });
+      const dispBal = (a) => a.type === 'btc' ? btcStats(a.id).value : accountBalance(a);
       let net = 0, anyBal = false;
-      for (const a of accts){ const b = accountBalance(a); if (b != null){ net += b; anyBal = true; } }
+      for (const a of accts){ const b = dispBal(a); if (b != null){ net += b; anyBal = true; } }
       html += '<div class="card"><div class="row" style="margin-bottom:8px"><span style="font-size:15px" class="grow"><b>Accounts</b>' +
         (anyBal ? ' — <b>' + fmt$(net) + '</b> net' : '') + '</span>' +
         '<a data-x="bal" style="cursor:pointer;font-size:13px">manage ›</a></div>' +
         accts.map((a) => {
-          const bal = accountBalance(a);
+          const bal = dispBal(a);
+          const sub = a.type === 'btc' ? fmtBtc(btcStats(a.id).sats) : esc(acctTypeLabel(a.type));
           return '<div class="list-item" data-aidhome="' + esc(a.id) + '"><span class="ic">' + acctIcon(a.type) + '</span>' +
-            '<div class="body"><div class="t1">' + esc(a.name) + '</div><div class="t2">' + esc(acctTypeLabel(a.type)) + '</div></div>' +
-            (bal == null ? '<span class="tiny" style="color:var(--accent)">set balance ›</span>'
+            '<div class="body"><div class="t1">' + esc(a.name) + '</div><div class="t2">' + sub + '</div></div>' +
+            (bal == null ? '<span class="tiny" style="color:var(--accent)">' + (a.type === 'btc' ? 'add BTC ›' : 'set balance ›') + '</span>'
                          : '<span class="amt"' + (bal < 0 ? ' style="color:var(--status-crit)"' : '') + '>' + fmt$(bal) + '</span>') + '</div>';
         }).join('') +
         (!anyBal ? '<p class="tiny" style="margin:8px 0 0">Tap an account to enter its current balance — Nest keeps it updated from your transactions.</p>' : '') +
@@ -1877,10 +1945,10 @@ function renderHome(){
 
   // Grouped by section (Money in · each expense group · Invested) — far easier to
   // scan than one flat list.
-  const gc = groupedCatHTML(st.byCat, st.incomeByCat, st.investByCat);
+  const gc = groupedCatHTML(st.byCat, st.incomeByCat, st.investByCat, { pfx: 'y' });
   if (gc)
     html += '<div class="card"><h3>' + esc(UI.year) + ' by category</h3>' +
-      '<p class="tiny" style="margin:0 0 2px">Grouped · <span style="color:var(--status-good)">money in</span> / money out / <span style="color:var(--blue)">invested</span> · tap any to see it</p>' +
+      '<p class="tiny" style="margin:0 0 4px">Tap a group or subcategory to expand · tap a category to open it</p>' +
       gc + '</div>';
 
   html += '<div class="card"><h3>Month by month</h3>' + st.perMonth.slice().reverse().map((m) =>
@@ -1916,6 +1984,9 @@ function renderHome(){
       ACT.cat = n2.dataset.cat; actSetMonth(null); showTab('activity');
     };
   });
+  c.querySelectorAll('[data-btog]').forEach((r) => {
+    r.onclick = () => { const k = r.dataset.btog; if (BREAKDOWN_OPEN.has(k)) BREAKDOWN_OPEN.delete(k); else BREAKDOWN_OPEN.add(k); renderHome(); };
+  });
   c.querySelectorAll('[data-ym]').forEach((n2) => {
     n2.onclick = () => openMonthModal(n2.dataset.ym);
   });
@@ -1946,7 +2017,7 @@ function renderMonthScreen(c, close){
   const mRecurSp = (mAgg.spendTotal || 0) - (mAgg.spendOneTime || 0), mOneSp = mAgg.spendOneTime || 0;
 
   let html = '';
-  if (close) html += '<div class="row" style="margin-bottom:6px"><button class="btn btn-sm" data-x="mclose">✕ Close</button><div class="grow"></div></div>';
+  if (close) html += '<div class="modal-closebar"><button class="btn btn-sm" data-x="mclose">✕ Close</button><b>' + fmtMonth(ym) + '</b><div style="width:64px"></div></div>';
   html += '<div class="month-nav"><button data-x="prev">‹</button><b>' + fmtMonth(ym) + '</b>' +
     '<button data-x="next"' + (ym >= currentYM() ? ' disabled' : '') + '>›</button></div>';
 
@@ -1993,12 +2064,8 @@ function renderMonthScreen(c, close){
     }
   }
 
-  // Charts, this month highlighted.
-  const yrMonths = Object.keys(agg).filter((k) => k.slice(0, 4) === ym.slice(0, 4)).sort();
-  if (yrMonths.length > 1) html += yearChartsHTML(agg, yrMonths, ym, baseline);
-
-  // Full grouped breakdown — money in AND money out AND invested.
-  const gc = groupedCatHTML(mAgg.spend, mAgg.income, mAgg.invest);
+  // Full grouped breakdown — money in AND money out AND invested (collapsible tree).
+  const gc = groupedCatHTML(mAgg.spend, mAgg.income, mAgg.invest, { pfx: 'm' });
   if (gc) html += '<div class="card"><h3>' + fmtMonth(ym) + ' by category</h3>' + gc + '</div>';
   else html += '<div class="empty">No activity in ' + fmtMonth(ym) + '.</div>';
 
@@ -2014,15 +2081,14 @@ function renderMonthScreen(c, close){
   on('[data-x=alla]', () => nav(() => { actSetMonth(ym); ACT.cat = null; showTab('activity'); }));
   on('[data-x=gob]', () => nav(() => openScreen('Budgets & Baseline', renderBudgetsScreen)));
   c.querySelectorAll('[data-aidm]').forEach((n2) => { n2.onclick = () => openAccountEditor(n2.dataset.aidm, () => renderMonthScreen(c, close)); });
-  c.querySelectorAll('.list-item[data-cat]').forEach((n2) => {
+  c.querySelectorAll('[data-btog]').forEach((r) => {
+    r.onclick = () => { const k = r.dataset.btog; if (BREAKDOWN_OPEN.has(k)) BREAKDOWN_OPEN.delete(k); else BREAKDOWN_OPEN.add(k); renderMonthScreen(c, close); };
+  });
+  c.querySelectorAll('.tree-row[data-cat]').forEach((n2) => {
     n2.onclick = () => {
       if (n2.dataset.cat === '__uncat'){ nav(() => showTab('review')); return; }
       ACT.cat = n2.dataset.cat; actSetMonth(ym); nav(() => showTab('activity'));
     };
-  });
-  bindChartTips(c);
-  c.querySelectorAll('[data-m]').forEach((r2) => {
-    r2.onclick = () => { UI.month = r2.dataset.m; renderMonthScreen(c, close); };
   });
 }
 /* ---- §Review (two modes: auto-sort queue + manual verify pass) ---- */
@@ -2364,20 +2430,27 @@ function barPath(x, yTop, w, hgt, color, opacity, attrs){
     ' Q' + (x + w).toFixed(1) + ',' + yTop.toFixed(1) + ' ' + (x + w).toFixed(1) + ',' + (yTop + r).toFixed(1) +
     ' L' + (x + w).toFixed(1) + ',' + (yTop + hgt).toFixed(1) + ' Z" fill="' + color + '" opacity="' + opacity + '"' + (attrs || '') + '/>';
 }
-// Wire hover tooltips for any [data-tip] element inside a chart wrapper.
+// Wire hover tooltips for any [data-tip] element inside a chart wrapper. The tip
+// lives on the (non-clipping) card and clamps to its bounds so it's never cut off.
 function bindChartTips(container){
   container.querySelectorAll('.chart-wrap').forEach((wrap) => {
-    let tip = wrap.querySelector('.chart-tip');
-    if (!tip){ tip = el('div', { class: 'chart-tip' }); wrap.appendChild(tip); }
+    const card = wrap.closest('.card') || wrap;
+    card.style.position = 'relative';
+    let tip = card.querySelector('.chart-tip');
+    if (!tip){ tip = el('div', { class: 'chart-tip' }); card.appendChild(tip); }
     const move = (e) => {
       const t = e.target.closest ? e.target.closest('[data-tip]') : null;
       const d = t && t.getAttribute('data-tip');
       if (!d){ tip.style.display = 'none'; return; }
-      const r = wrap.getBoundingClientRect();
-      const px = (e.touches ? e.touches[0].clientX : e.clientX) - r.left + wrap.scrollLeft;
-      const py = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
-      tip.innerHTML = d;
-      tip.style.left = px + 'px'; tip.style.top = py + 'px'; tip.style.display = 'block';
+      tip.innerHTML = d; tip.style.display = 'block';
+      const cr = card.getBoundingClientRect();
+      const cx = (e.touches ? e.touches[0].clientX : e.clientX) - cr.left;
+      const cy = (e.touches ? e.touches[0].clientY : e.clientY) - cr.top;
+      const tw = tip.offsetWidth, th = tip.offsetHeight;
+      const left = Math.max(tw / 2 + 6, Math.min(cr.width - tw / 2 - 6, cx));
+      if (cy - th - 16 < 0){ tip.style.transform = 'translate(-50%, 12px)'; } // flip below near the top
+      else { tip.style.transform = 'translate(-50%, -125%)'; }
+      tip.style.left = left + 'px'; tip.style.top = cy + 'px';
     };
     wrap.addEventListener('pointermove', move);
     wrap.addEventListener('pointerleave', () => { tip.style.display = 'none'; });
@@ -2500,13 +2573,14 @@ function yearChartsHTML(agg, months, sel, baseline){
         '<text x="' + (plotR + 14) + '" y="' + lb.y.toFixed(1) + '" font-size="10" fill="var(--dim)">' + esc(lb.name.slice(0, 12)) + '</text>';
     months.forEach((ym, i) => {
       if (n <= 8 || i % 2 === 0 || ym === sel)
-        s2 += '<text x="' + xL(i).toFixed(1) + '" y="' + (H2 - 6) + '" text-anchor="middle" font-size="10" fill="var(--faint)">' + fmtMonth(ym).slice(0, 3) + '</text>';
-      s2 += '<rect data-m="' + ym + '" x="' + (padL + i * colW2).toFixed(1) + '" y="0" width="' + colW2.toFixed(1) + '" height="' + H2 + '" fill="transparent" pointer-events="all" style="cursor:pointer"/>';
+        s2 += '<text x="' + xL(i).toFixed(1) + '" y="' + (H2 - 6) + '" text-anchor="middle" font-size="10" fill="var(--faint)" pointer-events="none">' + fmtMonth(ym).slice(0, 3) + '</text>';
+      const tip = '<b>' + fmtMonth(ym) + '</b><br>' + series.map((se) => esc(se.name) + ' ' + fmt$(se.vals[i])).join('<br>');
+      s2 += '<rect data-m="' + ym + '" data-tip="' + esc(tip) + '" x="' + (padL + i * colW2).toFixed(1) + '" y="0" width="' + colW2.toFixed(1) + '" height="' + H2 + '" fill="transparent" pointer-events="all" style="cursor:pointer"/>';
     });
     card2 = '<div class="card"><h3>Where it goes</h3>' +
       '<div class="chart-wrap"><svg viewBox="0 0 ' + W2 + ' ' + H2 + '" width="100%" xmlns="http://www.w3.org/2000/svg">' + s2 + '</svg></div>' +
       '<div class="legend">' + series.map((se) => '<span><i style="background:' + se.color + '"></i>' + esc(se.name) + '</span>').join('') + '</div>' +
-      '<div class="chart-caption">' + fmtMonth(sel) + ' — ' + series.map((se) => esc(se.name) + ' ' + fmt$(se.vals[si])).join(' · ') + '</div></div>';
+      '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Hover a month for its category values.</span></div></div>';
   }
   return card1 + card2;
 }
@@ -3008,19 +3082,22 @@ function renderCatsScreen(c){
 }
 
 /* ---- Accounts screen ---- */
-const acctIcon = (t) => t === 'credit' ? '💳' : t === 'investment' ? '📈' : t === 'savings' ? '🏦' : '🏦';
+const acctIcon = (t) => t === 'credit' ? '💳' : t === 'btc' ? '₿' : t === 'investment' ? '📈' : t === 'savings' ? '🏦' : '🏦';
 function renderAccountsScreen(c){
   const counts = {};
   for (const t of liveTxns()) counts[t.acct] = (counts[t.acct] || 0) + 1;
   const accts = Object.values(DATA.accounts).filter((a) => !a.deleted).sort((a, b) => (a.archived?1:0) - (b.archived?1:0));
+  if (accts.some((a) => a.type === 'btc' && !a.archived)) refreshBtcPrice().then((r) => { if (r.changed) renderAccountsScreen(c); });
+  // Balance to display: BTC accounts show current market value; others use the anchor+flows.
+  const dispBal = (a) => a.type === 'btc' ? btcStats(a.id).value : accountBalance(a);
   // Household roll-up: cash (checking+savings) + investments − credit owed.
   let cash = 0, invest = 0, credit = 0, anyBal = false;
   for (const a of accts){
     if (a.archived) continue;
-    const bal = accountBalance(a);
+    const bal = dispBal(a);
     if (bal == null) continue;
     anyBal = true;
-    if (a.type === 'credit') credit += bal; else if (a.type === 'investment') invest += bal; else cash += bal;
+    if (a.type === 'credit') credit += bal; else if (a.type === 'investment' || a.type === 'btc') invest += bal; else cash += bal;
   }
   const netWorth = cash + invest + credit; // credit balance is negative when owed
   let html = '';
@@ -3031,7 +3108,16 @@ function renderAccountsScreen(c){
   }
   html += '<div class="card"><h3>Accounts</h3>' +
     (accts.length ? accts.map((a) => {
-      const bal = accountBalance(a);
+      if (a.type === 'btc'){
+        const b = btcStats(a.id);
+        const gain = b.value != null ? b.value - b.invested : null;
+        return '<div class="list-item" data-aid="' + esc(a.id) + '"><span class="ic">' + acctIcon(a.type) + '</span>' +
+          '<div class="body"><div class="t1">' + esc(a.name) + (a.archived ? ' <span class="tiny">(archived)</span>' : '') + '</div>' +
+          '<div class="t2">' + fmtBtc(b.sats) + ' · avg ' + (b.avgCost ? fmt$(b.avgCost) : '—') + (b.price ? ' · now ' + fmt$(b.price) : '') + '</div></div>' +
+          '<span class="amt" style="text-align:right">' + (b.value != null ? fmt$(b.value) : '—') +
+          (gain != null ? '<div class="tiny" style="color:' + (gain >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(gain, { signed: true }) + '</div>' : '') + '</span></div>';
+      }
+      const bal = dispBal(a);
       return '<div class="list-item" data-aid="' + esc(a.id) + '"><span class="ic">' + acctIcon(a.type) + '</span>' +
       '<div class="body"><div class="t1">' + esc(a.name) + (a.archived ? ' <span class="tiny">(archived)</span>' : '') + '</div>' +
       '<div class="t2">' + esc(acctTypeLabel(a.type)) + ' · ' + (counts[a.id] || 0) + ' transactions</div></div>' +
