@@ -216,7 +216,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v3.0'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v3.1'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -858,45 +858,58 @@ function budgetFor(catId, baseline){
   if (baseline && baseline.cats[catId]) return { amt: baseline.cats[catId], source: 'baseline' };
   return null;
 }
-// Recurring charges, detected from merchant cadence. Each is classified:
-//   stable  = amount barely moves (subscriptions, mortgage) -> a fixed bill
-//   variable = same cadence, bouncing amount (electric, gas, CC payment) -> est + range
-// Transfers (e.g. CC payments) are INCLUDED but flagged kind:'transfer' so the
-// UI can show them for cash-flow awareness without counting them as spending.
+// Whole-number calendar months between two 'YYYY-MM' strings.
+function monthDiff(a, b){
+  const [ya, ma] = a.split('-').map(Number), [yb, mb] = b.split('-').map(Number);
+  return (yb - ya) * 12 + (mb - ma);
+}
+// Generic bank descriptors that are payment METHODS, not merchants — a "CHECK"
+// could be lawn care, a plumber, or a gift. Never group these by name.
+const RECUR_GENERIC = /\b(CHECK|CHK|DEBIT|CREDIT|DEPOSIT|WITHDRAWAL|ACH|ATM|WIRE|CASH|POS|ELECTRONIC|MOBILE DEPOSIT|BILLPAY|BILL PAY|E-?PAYMENT|ONLINE XFER|ONLINE TRANSFER|TRANSFER|AUTOPAY|PAYMENT THANK YOU)\b/;
+function recurNameMap(){ return (DATA.kv.recurNames && DATA.kv.recurNames.map) || {}; }
+function setRecurName(key, label){
+  const ent = DATA.kv.recurNames || { id: 'recurNames', map: {} };
+  ent.map = Object.assign({}, ent.map);
+  if (label && label.trim()) ent.map[key] = label.trim(); else delete ent.map[key];
+  put('kv', ent);
+}
+// Recurring bills, grouped by MERCHANT — except generic descriptors (CHECK, ACH,
+// …) which group by CATEGORY instead, since the payee is what matters, not the
+// method. Amounts are aggregated PER MONTH first (two lawn visits in June = one
+// June total), so estimates and ranges reflect real monthly spend, and $0 months
+// simply aren't "active" months. Labels are user-editable (kv.recurNames).
 function detectRecurring(){
-  const byM = {};
+  const groups = {};
   for (const t of liveTxns()){
     if (t.status === 'excluded' || t.amt >= 0) continue;
-    if (t.splits && t.splits.length) continue; // split txns aren't a single recurring line
-    (byM[t.m] = byM[t.m] || []).push(t);
+    if (t.splits && t.splits.length) continue;
+    const generic = RECUR_GENERIC.test(t.m);
+    let key, label;
+    if (!generic){ key = 'm:' + t.m; label = t.m; }
+    else if (t.cat && t.cat !== '__uncat' && catKind(t.cat) !== 'transfer'){ key = 'c:' + t.cat; label = catLabel(t.cat).name; }
+    else continue; // generic descriptor with no usable category — can't identify it
+    (groups[key] = groups[key] || { key, label, cat: t.cat, txns: [] }).txns.push(t);
   }
-  const perToMonthly = (v, period) => period === 'monthly' ? v
-    : period === 'weekly' ? Math.round(v * 52 / 12)
-    : period === 'quarterly' ? Math.round(v / 3)
-    : Math.round(v / 12);
+  const ov = recurNameMap();
   const out = [];
-  for (const m in byM){
-    const ts = byM[m].sort((a, b) => (a.date < b.date ? -1 : 1));
-    if (ts.length < 3) continue;
-    const gaps = [];
-    for (let i = 1; i < ts.length; i++) gaps.push(daysBetween(ts[i - 1].date, ts[i].date));
-    const gap = median(gaps);
-    let period = null;
-    if (gap >= 25 && gap <= 35) period = 'monthly';
-    else if (gap >= 6 && gap <= 8) period = 'weekly';
-    else if (gap >= 85 && gap <= 100) period = 'quarterly';
-    else if (gap >= 350 && gap <= 380) period = 'yearly';
-    if (!period) continue;
-    const amts = ts.map((t) => -t.amt);
-    const medAmt = median(amts);
-    const avgAmt = Math.round(amts.reduce((s, a) => s + a, 0) / amts.length);
-    const minA = Math.min.apply(null, amts), maxA = Math.max.apply(null, amts);
-    const stable = amts.every((a) => Math.abs(a - medAmt) <= Math.max(200, medAmt * 0.15));
-    const cat = ts[ts.length - 1].cat;
-    const kind = cat ? catKind(cat) : 'expense';
-    out.push({ merchant: m, period, count: ts.length, last: ts[ts.length - 1].date, cat, kind,
-               stable, amt: medAmt, avg: avgAmt, min: minA, max: maxA,
-               monthly: perToMonthly(stable ? medAmt : avgAmt, period) });
+  for (const key in groups){
+    const g = groups[key];
+    const byMonth = {};
+    for (const t of g.txns){ const m = ymOf(t.date); byMonth[m] = (byMonth[m] || 0) - t.amt; }
+    const months = Object.keys(byMonth).sort();
+    if (months.length < 3) continue; // need 3+ distinct months to call it recurring
+    const amts = months.map((m) => byMonth[m]);
+    const med = median(amts);
+    const minM = Math.min.apply(null, amts), maxM = Math.max.apply(null, amts);
+    const total = amts.reduce((s, a) => s + a, 0);
+    const span = monthDiff(months[0], months[months.length - 1]) + 1;
+    const seasonal = months.length < span;               // gap months in the span
+    const stable = !seasonal && amts.every((a) => Math.abs(a - med) <= Math.max(200, med * 0.12));
+    const kind = g.cat ? catKind(g.cat) : 'expense';
+    out.push({ key, label: ov[key] || g.label, autoLabel: g.label, edited: !!ov[key],
+               cat: g.cat, kind, stable, seasonal, monthsActive: months.length, span,
+               monthly: med, min: minM, max: maxM, total,
+               yearlyMonthly: Math.round(total / span), last: months[months.length - 1] });
   }
   return out.sort((a, b) => b.monthly - a.monthly);
 }
@@ -1740,7 +1753,7 @@ function renderHome(){
   const rec = detectRecurring();
   const recBills = rec.filter((r) => r.kind === 'expense'); // transfers shown in Recurring screen, not the load
   if (recBills.length){
-    const rt = recBills.reduce((s, r) => s + r.monthly, 0);
+    const rt = recBills.reduce((s, r) => s + r.yearlyMonthly, 0); // annualized so seasonal bills don't overstate
     html += '<div class="card" data-x="recur" style="cursor:pointer"><div class="row"><span style="font-size:18px">🔁</span>' +
       '<div class="grow muted">Recurring load: <b style="color:var(--text)">' + fmt$(rt) + '/mo</b> across ' + recBills.length + ' repeat bills</div>' +
       '<span class="menu-chev">›</span></div></div>';
@@ -2533,45 +2546,55 @@ function renderBudgetsScreen(c){
 function renderRecurringScreen(c){
   const rec = detectRecurring();
   if (!rec.length){
-    c.innerHTML = '<div class="empty">Nothing recurring detected yet.<br><span class="tiny">Needs 3+ charges from the same merchant on a steady cadence.</span></div>';
+    c.innerHTML = '<div class="empty">Nothing recurring detected yet.<br><span class="tiny">Needs a merchant (or a category, for check/ACH bills) seen in 3+ different months.</span></div>';
     return;
   }
   const fixed = rec.filter((r) => r.kind === 'expense' && r.stable);
   const variable = rec.filter((r) => r.kind === 'expense' && !r.stable);
   const transfers = rec.filter((r) => r.kind === 'transfer');
-  const billTotal = [...fixed, ...variable].reduce((s, r) => s + r.monthly, 0);
+  const billTotal = [...fixed, ...variable].reduce((s, r) => s + r.yearlyMonthly, 0);
 
-  const fixedRow = (r) =>
-    '<div class="list-item" style="cursor:default"><span class="ic">' + catLabel(r.cat).icon + '</span>' +
-    '<div class="body"><div class="t1">' + esc(r.merchant) + '</div>' +
-    '<div class="t2">' + r.period + ' · seen ' + r.count + '× · last ' + fmtDate(r.last) + ' · ' + esc(catLabel(r.cat).name) + '</div></div>' +
-    '<span class="amt">' + fmt$(r.monthly) + '/mo</span></div>';
-  // Variable rows lead with the estimate, then the historical min–max range.
-  const varRow = (r) =>
-    '<div class="list-item" style="cursor:default"><span class="ic">' + catLabel(r.cat).icon + '</span>' +
-    '<div class="body"><div class="t1">' + esc(r.merchant) + '</div>' +
-    '<div class="t2">' + r.period + ' · ranges ' + fmt$(r.min) + '–' + fmt$(r.max) + ' · seen ' + r.count + '× · ' + esc(catLabel(r.cat).name) + '</div></div>' +
-    '<span class="amt" style="text-align:right">~' + fmt$(r.monthly) + '<div class="tiny">/mo est</div></span></div>';
+  // freq: how often, honestly — "monthly", or "seasonal · N mo" when there are gaps.
+  const freq = (r) => r.seasonal ? 'seasonal · ' + r.monthsActive + ' of ' + r.span + ' mo' : 'monthly · ' + r.monthsActive + ' mo';
+  const row = (r, showRange) => {
+    const cl = catLabel(r.cat);
+    const sub = freq(r) + (showRange && r.min !== r.max ? ' · ' + fmt$(r.min) + '–' + fmt$(r.max) : '') + ' · ' + esc(cl.name);
+    return '<div class="list-item" data-recur="' + esc(r.key) + '" style="cursor:pointer"><span class="ic">' + cl.icon + '</span>' +
+      '<div class="body"><div class="t1">' + esc(r.label) + (r.edited ? '' : '') + '</div>' +
+      '<div class="t2">' + sub + '</div></div>' +
+      '<span class="amt" style="text-align:right">' + (showRange ? '~' : '') + fmt$(r.monthly) + '<div class="tiny">/mo' + (r.seasonal ? ' in season' : '') + '</div></span></div>';
+  };
 
   let html = '<div class="stat" style="margin-bottom:12px"><div class="v">' + fmt$(billTotal) + '/mo</div>' +
-    '<div class="l">estimated recurring bills</div></div>';
+    '<div class="l">recurring bills, averaged over the year</div></div>' +
+    '<p class="tiny" style="margin:0 0 10px">Tap any row to rename it. Bills paid by check/ACH are grouped by category (the payee), not the word “Check”.</p>';
 
   if (fixed.length)
-    html += '<div class="card"><h3>Fixed — same price</h3>' + fixed.map(fixedRow).join('') + '</div>';
+    html += '<div class="card"><h3>Fixed — same price</h3>' + fixed.map((r) => row(r, false)).join('') + '</div>';
 
-  if (variable.length){
-    const vTot = variable.reduce((s, r) => s + r.monthly, 0);
-    html += '<div class="card"><h3>Variable — changes monthly</h3>' +
-      '<p class="tiny" style="margin:0 0 6px">Utilities, and other bills that bounce around. Estimate is your average; range is what you’ve actually paid. ≈ ' + fmt$(vTot) + '/mo.</p>' +
-      variable.map(varRow).join('') + '</div>';
-  }
+  if (variable.length)
+    html += '<div class="card"><h3>Variable — changes month to month</h3>' +
+      '<p class="tiny" style="margin:0 0 6px">Utilities, lawn care, and other bills that bounce. “/mo” is your typical charge in a month you pay; the range is what you’ve actually paid.</p>' +
+      variable.map((r) => row(r, true)).join('') + '</div>';
 
   if (transfers.length)
     html += '<div class="card"><h3>Recurring transfers</h3>' +
-      '<p class="tiny" style="margin:0 0 6px">Card payments &amp; the like — repeat every month but aren’t spending (the purchases they cover are). Shown for cash-flow awareness; not in the total above.</p>' +
-      transfers.map(varRow).join('') + '</div>';
+      '<p class="tiny" style="margin:0 0 6px">Card payments &amp; the like — repeat monthly but aren’t spending (the purchases they cover are). Not in the total above.</p>' +
+      transfers.map((r) => row(r, true)).join('') + '</div>';
 
   c.innerHTML = html;
+  c.querySelectorAll('[data-recur]').forEach((n2) => {
+    n2.onclick = () => {
+      const r = rec.find((x) => x.key === n2.dataset.recur);
+      if (!r) return;
+      const m = modal('Rename recurring item',
+        '<label class="fld"><span>Display name</span><input type="text" data-x="nm" value="' + esc(r.label) + '"></label>' +
+        '<p class="tiny" style="margin:0 0 12px">Auto-detected as “' + esc(r.autoLabel) + '”. Renaming only changes how it shows here.</p>' +
+        '<div class="row"><button class="btn grow" data-x="rst">Reset to auto</button><button class="btn btn-primary grow" data-x="sv">Save</button></div>');
+      m.node.querySelector('[data-x=sv]').onclick = () => { setRecurName(r.key, m.node.querySelector('[data-x=nm]').value); m.close(); renderRecurringScreen(c); };
+      m.node.querySelector('[data-x=rst]').onclick = () => { setRecurName(r.key, ''); m.close(); renderRecurringScreen(c); };
+    };
+  });
 }
 
 /* ---- Categories & Rules screen ---- */
