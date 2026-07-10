@@ -216,6 +216,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
+const BUILD = 'v2.1'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1506,6 +1507,13 @@ function renderHome(){
         (st.proj.net >= 0 ? ' — on pace to come out ahead.' : ' — on pace to go under; “Where to cut” below.') + '</p>' +
         '<p class="tiny" style="margin:0 0 6px">Pace includes everyday spending (yes, gifts &amp; dining) but not one-time house/wedding costs; only paycheck-style income projects forward — windfalls count once.</p>'
       : '') +
+    (() => {
+      const negs = st.months.filter((ym) => agg[ym].spendTotal < 0);
+      return negs.length
+        ? '<p style="margin:0 0 6px;color:var(--status-crit)">⚠️ ' + negs.map(fmtMonth).join(', ') +
+          (negs.length > 1 ? ' show' : ' shows') + ' <b>negative total spending</b> — money-in is filed under a spending category and every number here is wrong until it’s fixed. More → Data health lists the culprits.</p>'
+        : '';
+    })() +
     (st.invest > 0 ? '<p class="muted" style="margin:0 0 6px">📈 Plus ' + fmt$(st.invest) + ' invested — kept separate from spending.</p>' : '') +
     (st.oneTime > 0 ? '<p class="muted" style="margin:0">🏠 One-time house / big-event spending: ' + fmt$(st.oneTime) + ' — excluded from your baseline.</p>' : '') +
     '</div>';
@@ -2067,7 +2075,7 @@ function renderMore(){
   c.innerHTML = '<div class="card">' + items.map((it, i) =>
     '<div class="list-item" data-mi="' + i + '"><span class="ic">' + it[0] + '</span><div class="body"><div class="t1">' + it[1] +
     '</div><div class="t2">' + esc(it[2]) + '</div></div><span class="menu-chev">›</span></div>').join('') + '</div>' +
-    '<p class="tiny" style="text-align:center">Nest v2 — local-first · E2E-encrypted sync</p>';
+    '<p class="tiny" style="text-align:center">Nest ' + BUILD + ' — local-first · E2E-encrypted sync</p>';
   c.querySelectorAll('[data-mi]').forEach((n2) => { n2.onclick = () => items[+n2.dataset.mi][3](); });
 }
 
@@ -2328,7 +2336,25 @@ function renderHealthScreen(c){
   const rv = reviewTxns().length;
   let html = '<p class="muted" style="margin:0 0 10px">Every account, every month between its first and last transaction. ' +
     '<b>A month with zero transactions almost always means a missing statement</b> — gaps silently skew averages, the baseline and the yearly forecast.</p>' +
-    (rv ? '<p class="tiny" style="margin:0 0 10px">Also: ' + rv + ' transactions still in review — they count as Uncategorized spend until sorted.</p>' : '');
+    (rv ? '<p class="tiny" style="margin:0 0 10px">Also: ' + rv + ' transactions still in review — unsorted money sits out of all totals until sorted.</p>' : '');
+
+  // Money-in filed under spending categories: each one REDUCES that month's
+  // spend by its full amount — the #1 cause of impossible negative months.
+  const agg = buildMonthAgg();
+  const negMonths = Object.keys(agg).filter((ym) => agg[ym].spendTotal < 0).sort();
+  const susp = txns.filter((t) => {
+    if (t.status === 'excluded' || t.amt < 10000) return false; // inflows >= $100 only
+    return effParts(t).some((p) => p.cat && p.cat !== '__uncat' && catKind(p.cat) === 'expense' && p.amt > 0);
+  }).sort((a, b) => b.amt - a.amt);
+  if (negMonths.length || susp.length){
+    html += '<div class="card" style="border-color:var(--status-crit)"><h3>⚠️ Math-breaking anomalies</h3>' +
+      (negMonths.length ? '<p style="margin:0 0 8px">' + negMonths.map(fmtMonth).join(', ') +
+        (negMonths.length > 1 ? ' have' : ' has') + ' <b>negative total spending</b>.</p>' : '') +
+      (susp.length ? '<p class="muted" style="margin:0 0 8px">These deposits are categorized as <b>spending</b>, so each one subtracts from its month. ' +
+        'Genuine refunds are fine; big ones are usually transfers or income wearing the wrong category. Tap to fix:</p>' +
+        susp.slice(0, 12).map((t) => txnRowHTML(t)).join('') : '') +
+      '</div>';
+  }
   for (const a of accts){
     const mine = txns.filter((t) => t.acct === a.id);
     if (!mine.length) continue;
@@ -2356,6 +2382,7 @@ function renderHealthScreen(c){
   }
   html += '<p class="tiny">Fix a gap by downloading that date range from the bank and importing it — overlapping rows are deduped automatically, so grabbing extra is always safe.</p>';
   c.innerHTML = html;
+  c.querySelectorAll('[data-txn]').forEach((n2) => { n2.onclick = () => openTxnEditor(n2.dataset.txn); });
 }
 
 /* ---- Claude triage screen ---- */
