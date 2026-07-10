@@ -216,7 +216,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v2.5'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v2.6'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -416,8 +416,15 @@ function softDelete(mapName, id){
 function seedIfEmpty(){
   // Upsert-if-missing, so new seed cats/rules reach EXISTING installs after an
   // app update. User-archived seeds stay archived (tombstone id still present).
+  // Names already in use (by anything not deleted) — so upserting new seed cats
+  // into an EXISTING install never creates a duplicate of a category the user
+  // already made themselves.
+  const usedNames = new Set(Object.values(DATA.cats).filter((c) => !c.deleted).map((c) => c.name.trim().toLowerCase()));
   for (const [id, group, name, icon, kind, oneTime] of SEED_CATS)
-    if (!DATA.cats[id]) DATA.cats[id] = { id, group, name, icon, kind: kind || 'expense', oneTime: !!oneTime, updatedAt: SEED_TS };
+    if (!DATA.cats[id] && !usedNames.has(name.trim().toLowerCase())){
+      DATA.cats[id] = { id, group, name, icon, kind: kind || 'expense', oneTime: !!oneTime, updatedAt: SEED_TS };
+      usedNames.add(name.trim().toLowerCase());
+    }
   SEED_RULES.forEach(([pattern, cat], i) => {
     const id = 'seed-r' + i;
     if (!DATA.rules[id]) DATA.rules[id] = { id, type: 'contains', pattern, cat, updatedAt: SEED_TS };
@@ -2386,8 +2393,86 @@ function renderRecurringScreen(c){
 }
 
 /* ---- Categories & Rules screen ---- */
+// How many live transactions reference a category (as cat or in any split part).
+function countCatTxns(catId){
+  let n = 0;
+  for (const id in DATA.txns){
+    const t = DATA.txns[id];
+    if (t.deleted) continue;
+    if (t.cat === catId || (t.splits && t.splits.some((p) => p.cat === catId))) n++;
+  }
+  return n;
+}
+// Move every transaction, split part, rule and budget from source -> target,
+// then archive the source. The target's type/settings win.
+function doMergeCategory(sourceId, targetId){
+  if (sourceId === targetId) return 0;
+  let n = 0;
+  for (const id in DATA.txns){
+    const t = DATA.txns[id];
+    if (t.deleted) continue;
+    let changed = false;
+    if (t.cat === sourceId){ t.cat = targetId; changed = true; }
+    if (t.splits && t.splits.length){
+      t.splits = t.splits.map((p) => { if (p.cat === sourceId){ changed = true; return { cat: targetId, amt: p.amt, note: p.note }; } return p; });
+    }
+    if (changed){ put('txns', t); n++; }
+  }
+  for (const id in DATA.rules){
+    const r = DATA.rules[id];
+    if (!r.deleted && r.cat === sourceId){ r.cat = targetId; put('rules', r); }
+  }
+  const sb = DATA.budgets[sourceId];
+  if (sb && !sb.deleted && sb.amt > 0){
+    const tb = DATA.budgets[targetId];
+    if (!tb || tb.deleted || !tb.amt) put('budgets', { id: targetId, amt: sb.amt });
+    softDelete('budgets', sourceId);
+  }
+  softDelete('cats', sourceId);
+  return n;
+}
+// Picker that disambiguates same-named categories by group + type.
+function openMergePicker(sourceId, after){
+  const src = DATA.cats[sourceId];
+  if (!src) return;
+  const kindLbl = (c) => { const k = c.kind || 'expense'; return k === 'expense' ? 'expense' : k; };
+  const targets = liveCats().filter((c) => c.id !== sourceId);
+  let html = '<p class="muted" style="margin:0 0 10px">Move all <b>' + countCatTxns(sourceId) + '</b> transactions from ' +
+    '<b>' + esc(src.icon || '') + ' ' + esc(src.name) + '</b> into which category? This one is then archived.</p>';
+  for (const g of GROUPS){
+    const cats = targets.filter((c) => c.group === g.id);
+    if (!cats.length) continue;
+    html += '<div class="group-label">' + esc(g.name) + '</div>' +
+      cats.map((c) => '<div class="list-item" data-tgt="' + esc(c.id) + '"><span class="ic">' + esc(c.icon || '•') + '</span>' +
+        '<div class="body"><div class="t1">' + esc(c.name) + '</div><div class="t2">' + esc(kindLbl(c)) +
+        (catExcludedFromEstimates(c) ? ' · one-time' : '') + '</div></div><span class="menu-chev">›</span></div>').join('');
+  }
+  const m = modal('Merge “' + src.name + '” into…', html);
+  m.node.querySelectorAll('[data-tgt]').forEach((n2) => {
+    n2.onclick = async () => {
+      const tgt = DATA.cats[n2.dataset.tgt];
+      if (!tgt) return;
+      if (!(await confirmDlg('Move all transactions from “' + src.name + '” into “' + tgt.name + '” (' + (tgt.kind || 'expense') + '), then archive “' + src.name + '”?', 'Merge'))) return;
+      const moved = doMergeCategory(sourceId, tgt.id);
+      m.close(); renderCurrent();
+      if (after) after();
+      toast('Merged ' + moved + ' transaction' + (moved === 1 ? '' : 's') + ' into ' + tgt.name);
+    };
+  });
+}
 function renderCatsScreen(c){
-  let html = '<div class="card"><h3>Categories</h3>';
+  // Surface duplicate names — the usual cause of "money in a spending category".
+  const byName = {};
+  for (const cat of liveCats()){ const k = cat.name.trim().toLowerCase(); (byName[k] = byName[k] || []).push(cat); }
+  const dupNames = Object.keys(byName).filter((k) => byName[k].length > 1);
+  let html = '';
+  if (dupNames.length){
+    html += '<div class="card" style="border-color:var(--status-warn)"><h3>⚠️ Duplicate categories</h3>' +
+      '<p class="muted" style="margin:0 0 8px">These names exist more than once (often one you made plus one Nest added). Open either and use <b>Merge into…</b> to combine them:</p>' +
+      dupNames.map((k) => byName[k].map((c) => '<span class="chip" data-cid="' + esc(c.id) + '">' + esc(c.icon || '') + ' ' + esc(c.name) + ' · ' + esc(c.kind || 'expense') + '</span>').join(' ')).join('<br>') +
+      '</div>';
+  }
+  html += '<div class="card"><h3>Categories</h3>';
   for (const g of GROUPS){
     const cats = liveCats().filter((cat) => cat.group === g.id);
     html += '<div class="group-label row"><span class="grow">' + esc(g.name) + '</span>' +
@@ -2449,6 +2534,7 @@ function renderCatsScreen(c){
         '<label class="row" style="margin:0 0 12px"><input type="checkbox" data-x="ot" style="width:auto"' +
           ((cat.oneTime || forcedOneTime) ? ' checked' : '') + (forcedOneTime ? ' disabled' : '') + '> ' +
           '<span class="muted">One-time — exclude from future forecasts &amp; the baseline' + (forcedOneTime ? ' (always, for this group)' : '') + '</span></label>' +
+        '<button class="btn btn-block" data-x="merge" style="margin-bottom:8px">🔀 Merge into another category…</button>' +
         '<div class="row"><button class="btn grow" data-x="sv">Save</button>' +
         '<button class="btn btn-danger grow" data-x="ar">Archive</button></div>');
       m.node.querySelector('[data-x=sv]').onclick = () => {
@@ -2460,6 +2546,7 @@ function renderCatsScreen(c){
         put('cats', cat); m.close(); renderCatsScreen(c); renderCurrent();
         toast('Category updated');
       };
+      m.node.querySelector('[data-x=merge]').onclick = () => { m.close(); openMergePicker(cat.id, () => renderCatsScreen(c)); };
       m.node.querySelector('[data-x=ar]').onclick = async () => {
         if (!(await confirmDlg('Archive “' + cat.name + '”? Existing transactions keep it; it just leaves the pickers.', 'Archive'))) return;
         softDelete('cats', cat.id); m.close(); renderCatsScreen(c);
