@@ -238,8 +238,11 @@ const SEED_CATS = [
   ['inc-pay',   'g-inc',  'Paycheck', '💵', 'income'],
   ['inc-other', 'g-inc',  'Other Income', '💰', 'income'],
   ['hou-mort',  'g-hou',  'Mortgage / Rent', '🏠'],
-  ['hou-util',  'g-hou',  'Utilities', '💡'],
-  ['hou-net',   'g-hou',  'Internet / Phone', '📶'],
+  ['hou-util',  'g-hou',  'Utilities (other)', '💡'],
+  ['hou-elec',  'g-hou',  'Electricity', '⚡'],
+  ['hou-gas',   'g-hou',  'Natural Gas', '🔥'],
+  ['hou-water', 'g-hou',  'Water', '💧'],
+  ['hou-net',   'g-hou',  'WiFi / Phone', '📶'],
   ['hou-ins',   'g-hou',  'Home Insurance', '🛡️'],
   ['hou-maint', 'g-hou',  'Maintenance & Repairs', '🔧'],
   ['hou-lawn',  'g-hou',  'Lawn Maintenance', '🌿'],
@@ -303,6 +306,12 @@ const SEED_RULES = [
   ['VANGUARD', 'invest'],
   ['CHARLES SCHWAB', 'invest'],
   ['ROBINHOOD', 'invest'],
+  ['ROCKLAND ELECTR', 'hou-elec'],
+  ['PSEG', 'hou-gas'],
+  ['PUBLIC SERVICE', 'hou-gas'],
+  ['SUEZ WATER', 'hou-water'],
+  ['VEOLIA', 'hou-water'],
+  ['AMERICAN WATER', 'hou-water'],
 ];
 
 /* ============================ UTILS ============================ */
@@ -679,22 +688,97 @@ function baselineByCat(agg){
   }
   return out;
 }
-// Suggested budgets from recent actuals: average monthly spend per category
-// over the last (up to) 6 FULL months with any data — the current partial
-// month is excluded — rounded UP to the nearest $10. Average (not median) on
-// purpose: lumpy-but-real costs like lawn care should suggest their run-rate.
-function suggestBudgets(agg){
+// Suggested budgets from actuals, scoped BY YEAR: this year's full months only
+// (the current partial month never counts). A brand-new year with no full
+// months yet falls back to ALL of last year — so January's estimates are built
+// from the previous year, and Dec 2025 never leaks into 2026 suggestions.
+// Consistent bills (mortgage, car payment: every month within ~2%/$2) suggest
+// their EXACT amount; variable categories suggest the average, rounded UP to
+// the nearest $10 so lumpy-but-real costs keep their run-rate.
+function suggestBudgets(agg, year){
   agg = agg || buildMonthAgg();
   const cur = currentYM();
-  const months = Object.keys(agg).filter((ym) => ym < cur).sort().slice(-6);
-  const out = { months: months.length, cats: {} };
+  year = year || cur.slice(0, 4);
+  let months = Object.keys(agg).filter((ym) => ym < cur && ym.slice(0, 4) === year).sort();
+  let basis = year;
+  if (!months.length){
+    basis = String(+year - 1);
+    months = Object.keys(agg).filter((ym) => ym.slice(0, 4) === basis).sort();
+  }
+  const out = { months: months.length, basis, cats: {}, stable: {} };
   if (!months.length) return out;
   for (const c of liveCats()){
     if ((c.kind || 'expense') !== 'expense') continue;
-    const total = months.reduce((sum, ym) => sum + (agg[ym].spend[c.id] || 0), 0);
-    if (total > 0) out.cats[c.id] = Math.ceil(total / months.length / 1000) * 1000;
+    const vals = months.map((ym) => agg[ym].spend[c.id] || 0);
+    const total = vals.reduce((s, v) => s + v, 0);
+    if (total <= 0) continue;
+    const med = median(vals);
+    const max = Math.max.apply(null, vals), min = Math.min.apply(null, vals);
+    if (months.length >= 2 && min > 0 && (max - min) <= Math.max(200, med * 0.02)){
+      out.cats[c.id] = med;          // steady bill -> expected budget is the bill itself
+      out.stable[c.id] = true;
+    } else {
+      out.cats[c.id] = Math.ceil(total / months.length / 1000) * 1000;
+    }
   }
   return out;
+}
+// Year rollup for the Home overview. For the current year, adds a year-end
+// projection at the recent run rate (average of the last up-to-3 full months);
+// the current partial month is projected at that rate too (or its actual, if
+// it already blew past it).
+function yearStats(agg, year){
+  agg = agg || buildMonthAgg();
+  const cur = currentYM();
+  const months = Object.keys(agg).filter((ym) => ym.slice(0, 4) === year).sort();
+  const st = { year, months, fullMonths: months.filter((ym) => ym < cur),
+               spend: 0, income: 0, invest: 0, oneTime: 0, byCat: {}, perMonth: [] };
+  for (const ym of months){
+    const a = agg[ym];
+    st.spend += a.spendTotal; st.income += a.incomeTotal; st.invest += (a.investTotal || 0);
+    st.perMonth.push({ ym, spend: a.spendTotal, income: a.incomeTotal, net: a.incomeTotal - a.spendTotal });
+    for (const cid in a.spend) st.byCat[cid] = (st.byCat[cid] || 0) + a.spend[cid];
+  }
+  for (const c of liveCats()){
+    const g = GROUPS.find((x) => x.id === c.group);
+    if (g && g.excludeFromBaseline) st.oneTime += st.byCat[c.id] || 0;
+  }
+  st.net = st.income - st.spend;
+  if (year === cur.slice(0, 4) && st.fullMonths.length){
+    const recent = st.fullMonths.slice(-3);
+    const rSpend = recent.reduce((s, ym) => s + agg[ym].spendTotal, 0) / recent.length;
+    const rIncome = recent.reduce((s, ym) => s + agg[ym].incomeTotal, 0) / recent.length;
+    const monthsLeft = 12 - (+cur.slice(5, 7));
+    const curSpent = agg[cur] ? agg[cur].spendTotal : 0;
+    const curIncome = agg[cur] ? agg[cur].incomeTotal : 0;
+    st.proj = {
+      spend: Math.round(st.spend - curSpent + Math.max(curSpent, rSpend) + rSpend * monthsLeft),
+      income: Math.round(st.income - curIncome + Math.max(curIncome, rIncome) + rIncome * monthsLeft),
+      rateSpend: Math.round(rSpend), rateIncome: Math.round(rIncome),
+    };
+    st.proj.net = st.proj.income - st.proj.spend;
+  }
+  return st;
+}
+// "Where to cut": expense categories most over their expected pace this year
+// (full months only; one-time groups excluded — you can't "cut" a wedding).
+function cutSuggestions(agg, year){
+  const st = yearStats(agg, year);
+  const baseline = baselineByCat(agg);
+  const E = st.fullMonths.length;
+  const out = [];
+  if (!E) return out;
+  for (const c of liveCats()){
+    if ((c.kind || 'expense') !== 'expense') continue;
+    const g = GROUPS.find((x) => x.id === c.group);
+    if (g && g.excludeFromBaseline) continue;
+    const b = budgetFor(c.id, baseline);
+    if (!b) continue;
+    const ytdFull = st.fullMonths.reduce((s, ym) => s + (agg[ym].spend[c.id] || 0), 0);
+    const over = ytdFull - b.amt * E;
+    if (over > 0) out.push({ cat: c, over, ytd: ytdFull, expected: b.amt * E });
+  }
+  return out.sort((a, b) => b.over - a.over).slice(0, 4);
 }
 // Explicit budget wins; else baseline; else null.
 function budgetFor(catId, baseline){
@@ -1361,7 +1445,7 @@ function importOneFile(a){
   });
 }
 
-/* ---- §Home ---- */
+/* ---- §Home (yearly overview — the financial-advisor view) ---- */
 function renderHome(){
   const c = $('#view-home');
   const all = liveTxns();
@@ -1377,7 +1461,103 @@ function renderHome(){
     return;
   }
   const agg = buildMonthAgg();
-  const mAgg = agg[UI.month] || { spend: {}, spendTotal: 0, incomeTotal: 0 };
+  const years = Array.from(new Set(Object.keys(agg).map((ym) => ym.slice(0, 4)))).sort();
+  const curYear = currentYM().slice(0, 4);
+  if (!UI.year || !years.includes(UI.year)) UI.year = years.includes(curYear) ? curYear : years[years.length - 1];
+  const yi = years.indexOf(UI.year);
+  const st = yearStats(agg, UI.year);
+  const baseline = baselineByCat(agg);
+  const rq = reviewTxns();
+  const rqOut = rq.reduce((s, t) => s + (t.amt < 0 ? -t.amt : 0), 0);
+
+  let html = '<div class="month-nav"><button data-x="prev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button><b>' + esc(UI.year) + '</b>' +
+    '<button data-x="next"' + (yi >= years.length - 1 ? ' disabled' : '') + '>›</button></div>';
+
+  html += '<div class="stat-grid" style="margin-bottom:12px">' +
+    '<div class="stat"><div class="v amt-pos">' + fmt$(st.income) + '</div><div class="l">Income ' + esc(UI.year) + '</div></div>' +
+    '<div class="stat"><div class="v">' + fmt$(st.spend) + '</div><div class="l">Spent ' + esc(UI.year) + '</div></div></div>';
+
+  const rate = st.income > 0 ? Math.round(100 * st.net / st.income) : null;
+  html += '<div class="card"><h3>The bottom line</h3>' +
+    '<p style="margin:0 0 6px">Net so far: <b style="color:' + (st.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(st.net, { signed: true }) + '</b>' +
+    (rate !== null ? ' <span class="muted">(' + (st.net >= 0 ? 'saving ' + rate + '% of income' : 'spending above income') + ')</span>' : '') + '</p>' +
+    (st.proj
+      ? '<p style="margin:0 0 6px">At your recent pace — ' + fmt$(st.proj.rateSpend) + '/mo out, ' + fmt$(st.proj.rateIncome) + '/mo in — you’ll end ' + esc(UI.year) + ' around ' +
+        '<b style="color:' + (st.proj.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(st.proj.net, { signed: true }) + '</b>' +
+        (st.proj.net >= 0 ? ' — on pace to come out ahead.' : ' — on pace to go under; “Where to cut” below.') + '</p>'
+      : '') +
+    (st.invest > 0 ? '<p class="muted" style="margin:0 0 6px">📈 Plus ' + fmt$(st.invest) + ' invested — kept separate from spending.</p>' : '') +
+    (st.oneTime > 0 ? '<p class="muted" style="margin:0">🏠 One-time house / big-event spending: ' + fmt$(st.oneTime) + ' — excluded from your baseline.</p>' : '') +
+    '</div>';
+
+  if (rq.length){
+    html += '<div class="card banner-review" data-x="rev"><div class="row"><span style="font-size:20px">🧾</span>' +
+      '<div class="grow"><b>' + rq.length + '</b> transaction' + (rq.length > 1 ? 's' : '') + ' need review' +
+      '<div class="tiny">' + fmt$(rqOut) + ' not yet sorted — numbers above are incomplete until sorted</div></div><span class="menu-chev">›</span></div></div>';
+  }
+
+  const cuts = cutSuggestions(agg, UI.year);
+  if (cuts.length){
+    html += '<div class="card"><h3>Where to cut</h3><p class="tiny" style="margin:0 0 6px">Most over their expected pace in ' + esc(UI.year) + ' (full months only)</p>' +
+      cuts.map((x) => '<div class="list-item" data-cat="' + esc(x.cat.id) + '"><span class="ic">' + esc(x.cat.icon || '•') + '</span>' +
+        '<div class="body"><div class="t1">' + esc(x.cat.name) + '</div><div class="t2">' + fmt$(x.ytd) + ' spent vs ' + fmt$(x.expected) + ' expected</div></div>' +
+        '<span class="amt" style="color:var(--status-crit)">+' + fmt$(x.over) + '</span></div>').join('') + '</div>';
+  } else if (st.fullMonths.length){
+    html += '<div class="card"><h3>Where to cut</h3><p class="muted" style="margin:0">Nothing is over its expected pace' +
+      (baseline ? '' : ' — set budgets or a baseline to sharpen this') + '. 👏</p></div>';
+  }
+
+  const mDiv = Math.max(1, st.months.length);
+  const catRows = Object.keys(st.byCat).map((cid) => ({ cid, total: st.byCat[cid] }))
+    .filter((x) => x.total > 0).sort((a, b) => b.total - a.total).slice(0, 8);
+  if (catRows.length){
+    html += '<div class="card"><h3>' + esc(UI.year) + ' by category</h3>' + catRows.map((x) => {
+      const cl = catLabel(x.cid);
+      return '<div class="list-item" data-cat="' + esc(x.cid) + '"><span class="ic">' + cl.icon + '</span>' +
+        '<div class="body"><div class="t1">' + esc(cl.name) + '</div><div class="t2">' + fmt$(Math.round(x.total / mDiv)) + '/mo avg</div></div>' +
+        '<span class="amt">' + fmt$(x.total) + '</span></div>';
+    }).join('') + '</div>';
+  }
+
+  html += '<div class="card"><h3>Month by month</h3>' + st.perMonth.slice().reverse().map((m) =>
+    '<div class="list-item" data-ym="' + m.ym + '"><div class="body"><div class="t1">' + fmtMonth(m.ym) + '</div>' +
+    '<div class="t2">out ' + fmt$(m.spend) + ' · in ' + fmt$(m.income) + '</div></div>' +
+    '<span class="amt" style="color:' + (m.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(m.net, { signed: true }) + '</span>' +
+    '<span class="menu-chev">›</span></div>').join('') +
+    '<p class="tiny" style="margin:8px 0 0">Tap a month for its full breakdown — budgets, categories, gifts, alcohol, groceries…</p></div>';
+
+  const rec = detectRecurring();
+  if (rec.length){
+    const rt = rec.reduce((s, r) => s + r.monthly, 0);
+    html += '<div class="card" data-x="recur" style="cursor:pointer"><div class="row"><span style="font-size:18px">🔁</span>' +
+      '<div class="grow muted">Recurring load: <b style="color:var(--text)">' + fmt$(rt) + '/mo</b> across ' + rec.length + ' repeat bills</div>' +
+      '<span class="menu-chev">›</span></div></div>';
+  }
+  html += '<button class="btn btn-primary btn-block" data-x="import" style="margin-bottom:16px">📥 Import statements</button>';
+  c.innerHTML = html;
+
+  c.querySelector('[data-x=prev]').onclick = () => { UI.year = years[yi - 1]; renderHome(); };
+  c.querySelector('[data-x=next]').onclick = () => { UI.year = years[yi + 1]; renderHome(); };
+  const on = (sel, fn) => { const n2 = c.querySelector(sel); if (n2) n2.onclick = fn; };
+  on('[data-x=rev]', () => showTab('review'));
+  on('[data-x=recur]', () => openScreen('Recurring', renderRecurringScreen));
+  on('[data-x=import]', () => openScreen('Import', renderImportScreen));
+  c.querySelectorAll('[data-cat]').forEach((n2) => {
+    n2.onclick = () => {
+      if (n2.dataset.cat === '__uncat'){ showTab('review'); return; }
+      ACT.cat = n2.dataset.cat; ACT.month = null; showTab('activity');
+    };
+  });
+  c.querySelectorAll('[data-ym]').forEach((n2) => {
+    n2.onclick = () => { UI.month = n2.dataset.ym; openScreen('Monthly detail', renderMonthScreen); };
+  });
+}
+
+/* ---- Monthly detail (drill-down from the yearly Home) ---- */
+function renderMonthScreen(c){
+  const agg = buildMonthAgg();
+  if (!UI.month) UI.month = currentYM();
+  const mAgg = agg[UI.month] || { spend: {}, spendTotal: 0, incomeTotal: 0, investTotal: 0 };
   const baseline = baselineByCat(agg);
   let totalBudget = 0, anyBudget = false;
   for (const cat of liveCats()){
@@ -1386,9 +1566,6 @@ function renderHome(){
     if (b){ totalBudget += b.amt; anyBudget = true; }
   }
   const left = totalBudget - mAgg.spendTotal;
-  const rq = reviewTxns();
-  const rqOut = rq.reduce((s, t) => s + (t.amt < 0 ? -t.amt : 0), 0);
-
   let html = '<div class="month-nav"><button data-x="prev">‹</button><b>' + fmtMonth(UI.month) + '</b>' +
     '<button data-x="next"' + (UI.month >= currentYM() ? ' disabled' : '') + '>›</button></div>';
   html += '<div class="stat-grid" style="margin-bottom:12px">' +
@@ -1399,11 +1576,6 @@ function renderHome(){
         '<div class="l">Budget left</div><div class="tiny">of ' + fmt$(totalBudget) + '</div></div>'
       : '<div class="stat" data-x="setb" style="cursor:pointer"><div class="v">→</div><div class="l">Set budgets</div>' +
         '<div class="tiny">Baseline & budgets</div></div>') + '</div>';
-  if (rq.length){
-    html += '<div class="card banner-review" data-x="rev"><div class="row"><span style="font-size:20px">🧾</span>' +
-      '<div class="grow"><b>' + rq.length + '</b> transaction' + (rq.length > 1 ? 's' : '') + ' need review' +
-      '<div class="tiny">' + fmt$(rqOut) + ' not yet sorted</div></div><span class="menu-chev">›</span></div></div>';
-  }
   const rows = [];
   for (const cat of liveCats()){
     if ((cat.kind || 'expense') !== 'expense') continue;
@@ -1413,10 +1585,9 @@ function renderHome(){
     rows.push({ cat, spent, b });
   }
   rows.sort((x, y) => y.spent - x.spent);
-  const top = rows.slice(0, 10);
-  if (top.length){
+  if (rows.length){
     html += '<div class="card"><h3>' + fmtMonth(UI.month) + ' by category</h3>';
-    for (const r of top){
+    for (const r of rows){
       let bar;
       if (r.b){
         const pct = r.b.amt > 0 ? r.spent / r.b.amt : 0;
@@ -1432,36 +1603,26 @@ function renderHome(){
         '<div class="t2">Tap to review</div></div><span class="amt">' + fmt$(mAgg.spend.__uncat) + '</span></div>';
     }
     html += '<button class="btn btn-sm btn-block" data-x="allb" style="margin-top:8px">All budgets →</button></div>';
+  } else {
+    html += '<div class="empty">No activity in ' + fmtMonth(UI.month) + '.</div>';
   }
-  let hs = 0;
-  for (const cat of liveCats()){
-    const g = GROUPS.find((x) => x.id === cat.group);
-    if (g && g.excludeFromBaseline) hs += mAgg.spend[cat.id] || 0;
-  }
-  if (hs > 0)
-    html += '<div class="card"><div class="row"><span style="font-size:18px">🏠</span>' +
-      '<div class="grow muted">One-time / big-event spending this month: <b style="color:var(--text)">' + fmt$(hs) + '</b>' +
-      '<div class="tiny">House Setup &amp; Big Events — kept out of your natural-budget baseline</div></div></div></div>';
   if ((mAgg.investTotal || 0) > 0)
     html += '<div class="card"><div class="row"><span style="font-size:18px">📈</span>' +
-      '<div class="grow muted">Invested this month: <b style="color:var(--text)">' + fmt$(mAgg.investTotal) + '</b>' +
-      '<div class="tiny">Counted separately — investing isn’t spending</div></div></div></div>';
-  const recent = all.filter((t) => t.status !== 'excluded')
-    .sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0)).slice(0, 6);
-  html += '<div class="card"><h3>Recent activity</h3>' + recent.map((t) => txnRowHTML(t)).join('') +
-    '<button class="btn btn-sm btn-block" data-x="alla" style="margin-top:8px">All activity →</button></div>';
-  html += '<button class="btn btn-primary btn-block" data-x="import" style="margin-bottom:16px">📥 Import statements</button>';
+      '<div class="grow muted">Invested this month: <b style="color:var(--text)">' + fmt$(mAgg.investTotal) + '</b></div></div></div>';
+  const monthTxns = liveTxns().filter((t) => t.status !== 'excluded' && ymOf(t.date) === UI.month)
+    .sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0)).slice(0, 8);
+  if (monthTxns.length)
+    html += '<div class="card"><h3>Activity</h3>' + monthTxns.map((t) => txnRowHTML(t)).join('') +
+      '<button class="btn btn-sm btn-block" data-x="alla" style="margin-top:8px">All of ' + fmtMonth(UI.month) + ' →</button></div>';
   c.innerHTML = html;
 
-  c.querySelector('[data-x=prev]').onclick = () => { UI.month = shiftYM(UI.month, -1); renderHome(); };
-  c.querySelector('[data-x=next]').onclick = () => { UI.month = shiftYM(UI.month, 1); renderHome(); };
+  c.querySelector('[data-x=prev]').onclick = () => { UI.month = shiftYM(UI.month, -1); renderMonthScreen(c); };
+  c.querySelector('[data-x=next]').onclick = () => { UI.month = shiftYM(UI.month, 1); renderMonthScreen(c); };
   const on = (sel, fn) => { const n2 = c.querySelector(sel); if (n2) n2.onclick = fn; };
-  on('[data-x=rev]', () => showTab('review'));
   on('[data-x=unc]', () => showTab('review'));
   on('[data-x=setb]', () => openScreen('Budgets & Baseline', renderBudgetsScreen));
   on('[data-x=allb]', () => openScreen('Budgets & Baseline', renderBudgetsScreen));
-  on('[data-x=alla]', () => showTab('activity'));
-  on('[data-x=import]', () => openScreen('Import', renderImportScreen));
+  on('[data-x=alla]', () => { ACT.month = UI.month; ACT.cat = null; showTab('activity'); });
   c.querySelectorAll('[data-txn]').forEach((n2) => { n2.onclick = () => openTxnEditor(n2.dataset.txn); });
   c.querySelectorAll('.list-item[data-cat]').forEach((n2) => {
     n2.onclick = () => { ACT.cat = n2.dataset.cat; ACT.month = UI.month; showTab('activity'); };
@@ -1845,7 +2006,7 @@ function renderMore(){
   c.innerHTML = '<div class="card">' + items.map((it, i) =>
     '<div class="list-item" data-mi="' + i + '"><span class="ic">' + it[0] + '</span><div class="body"><div class="t1">' + it[1] +
     '</div><div class="t2">' + esc(it[2]) + '</div></div><span class="menu-chev">›</span></div>').join('') + '</div>' +
-    '<p class="tiny" style="text-align:center">Nest v1.1 — local-first · E2E-encrypted sync</p>';
+    '<p class="tiny" style="text-align:center">Nest v2 — local-first · E2E-encrypted sync</p>';
   c.querySelectorAll('[data-mi]').forEach((n2) => { n2.onclick = () => items[+n2.dataset.mi][3](); });
 }
 
@@ -1878,7 +2039,7 @@ function renderBudgetsScreen(c){
     (baseline ? ' <b style="color:var(--text)">Baseline: ' + fmt$(baseline.total) + '/mo across ' + baseline.months + ' month' + (baseline.months > 1 ? 's' : '') + ' of data.</b>' : '') +
     '</p></div>';
   html += '<div class="card"><h3>Monthly budgets</h3><p class="tiny" style="margin:0 0 8px">Blank = use baseline automatically. ' +
-    (sugg.months ? '“avg” = what you actually spent (last ' + sugg.months + ' full month' + (sugg.months > 1 ? 's' : '') + ') — tap one to use it.' : 'Suggestions appear once a full month of data exists.') + '</p>' +
+    (sugg.months ? 'Suggestions come from your <b>' + esc(sugg.basis) + '</b> actuals (' + sugg.months + ' full month' + (sugg.months > 1 ? 's' : '') + '). Steady bills like the mortgage suggest their exact amount (“fixed”); variable ones suggest the average (“avg”). Tap one to use it.' : 'Suggestions appear once a full month of data exists.') + '</p>' +
     (sugg.months ? '<button class="btn btn-sm btn-block" data-x="fillall" style="margin-bottom:8px">💡 Fill empty budgets from actuals</button>' : '');
   let total = 0;
   for (const g of GROUPS){
@@ -1893,7 +2054,7 @@ function renderBudgetsScreen(c){
       if (bf) total += bf.amt;
       const baseTxt = baseline && baseline.cats[cat.id] ? fmt$(baseline.cats[cat.id]) : '—';
       const sugTxt = sugg.cats[cat.id]
-        ? ' · <a data-sug="' + esc(cat.id) + '" style="cursor:pointer">avg ' + fmt$(sugg.cats[cat.id]) + ' — use</a>' : '';
+        ? ' · <a data-sug="' + esc(cat.id) + '" style="cursor:pointer">' + (sugg.stable[cat.id] ? 'fixed ' : 'avg ') + fmt$(sugg.cats[cat.id]) + ' — use</a>' : '';
       html += '<div class="list-item" style="cursor:default"><span class="ic">' + esc(cat.icon || '•') + '</span>' +
         '<div class="body"><div class="t1">' + esc(cat.name) + '</div><div class="t2">baseline ' + baseTxt + sugTxt + '</div></div>' +
         '<input class="budget-in" type="number" min="0" step="1" inputmode="decimal" data-bcat="' + esc(cat.id) + '"' +
