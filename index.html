@@ -273,6 +273,7 @@ const SEED_CATS = [
   ['tv',        'g-tv',   'Travel', '✈️'],
   ['mo-fee',    'g-mo',   'Fees & Interest', '🏦'],
   ['mo-give',   'g-mo',   'Donations', '❤️'],
+  ['invest',    'g-mo',   'Investments', '📈', 'invest'],
   ['sys-transfer', 'g-sys', 'Transfers & CC Payments', '🔁', 'transfer'],
   ['sys-misc',  'g-sys',  'Miscellaneous', '❓'],
 ];
@@ -296,6 +297,12 @@ const SEED_RULES = [
   ['LIQUOR', 'alc'],
   ['BOTTLE KING', 'alc'],
   ['WINE & SPIRITS', 'alc'],
+  ['COINBASE', 'invest'],
+  ['ZERO HASH', 'invest'], // Strike's ACH processor
+  ['FIDELITY', 'invest'],
+  ['VANGUARD', 'invest'],
+  ['CHARLES SCHWAB', 'invest'],
+  ['ROBINHOOD', 'invest'],
 ];
 
 /* ============================ UTILS ============================ */
@@ -641,10 +648,11 @@ function buildMonthAgg(){
   for (const t of liveTxns()){
     if (t.status === 'excluded') continue;
     const ym = ymOf(t.date);
-    const bucket = out[ym] || (out[ym] = { spend: {}, spendTotal: 0, incomeTotal: 0 });
+    const bucket = out[ym] || (out[ym] = { spend: {}, spendTotal: 0, incomeTotal: 0, investTotal: 0 });
     for (const part of effParts(t)){
       const kind = part.cat === '__uncat' ? 'expense' : catKind(part.cat);
       if (kind === 'transfer') continue;
+      if (kind === 'invest'){ bucket.investTotal -= part.amt; continue; } // net invested; sells reduce it
       if (kind === 'income'){ bucket.incomeTotal += part.amt; continue; }
       bucket.spend[part.cat] = (bucket.spend[part.cat] || 0) - part.amt;
       bucket.spendTotal -= part.amt;
@@ -1434,6 +1442,10 @@ function renderHome(){
     html += '<div class="card"><div class="row"><span style="font-size:18px">🏠</span>' +
       '<div class="grow muted">One-time / big-event spending this month: <b style="color:var(--text)">' + fmt$(hs) + '</b>' +
       '<div class="tiny">House Setup &amp; Big Events — kept out of your natural-budget baseline</div></div></div></div>';
+  if ((mAgg.investTotal || 0) > 0)
+    html += '<div class="card"><div class="row"><span style="font-size:18px">📈</span>' +
+      '<div class="grow muted">Invested this month: <b style="color:var(--text)">' + fmt$(mAgg.investTotal) + '</b>' +
+      '<div class="tiny">Counted separately — investing isn’t spending</div></div></div></div>';
   const recent = all.filter((t) => t.status !== 'excluded')
     .sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0)).slice(0, 6);
   html += '<div class="card"><h3>Recent activity</h3>' + recent.map((t) => txnRowHTML(t)).join('') +
