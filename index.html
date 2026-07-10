@@ -216,7 +216,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v2.8'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v2.9'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -784,10 +784,12 @@ function yearStats(agg, year){
   const cur = currentYM();
   const months = Object.keys(agg).filter((ym) => ym.slice(0, 4) === year).sort();
   const st = { year, months, fullMonths: months.filter((ym) => ym < cur),
-               spend: 0, income: 0, invest: 0, oneTime: 0, byCat: {}, incomeByCat: {}, investByCat: {}, perMonth: [] };
+               spend: 0, income: 0, invest: 0, oneTime: 0, incomeRecur: 0, spendOneTimeAgg: 0,
+               byCat: {}, incomeByCat: {}, investByCat: {}, perMonth: [] };
   for (const ym of months){
     const a = agg[ym];
     st.spend += a.spendTotal; st.income += a.incomeTotal; st.invest += (a.investTotal || 0);
+    st.incomeRecur += a.incomeRecur; st.spendOneTimeAgg += a.spendOneTime;
     st.perMonth.push({ ym, spend: a.spendTotal, income: a.incomeTotal, net: a.incomeTotal - a.spendTotal });
     for (const cid in a.spend) st.byCat[cid] = (st.byCat[cid] || 0) + a.spend[cid];
     for (const cid in (a.income || {})) st.incomeByCat[cid] = (st.incomeByCat[cid] || 0) + a.income[cid];
@@ -1207,12 +1209,28 @@ function openSyncSettings(){ openScreen('Sync', renderSyncScreen); }
 let LAST_IMPORT_ACCT = null;
 const REVIEW_SKIP = new Set();
 const REVIEW = { mode: 'sort', month: null, acct: null }; // Review tab: auto-sort queue vs manual verify pass
+let HOME_BL = 'overall'; // Bottom Line lens: overall | recurring | oneoff
 const ACT = { q: '', acct: null, cat: null, month: null, status: null, limit: 200, select: false, sel: new Set() };
 const TRENDS_SEL = { month: null };
 
 /* ---- shared helpers ---- */
 function accountName(id){ const a = DATA.accounts[id]; return a ? a.name : 'Unknown'; }
 function liveAccounts(){ return Object.values(DATA.accounts).filter((a) => !a.deleted && !a.archived); }
+// Current balance = the user's anchor balance + every real money movement on the
+// account since the anchor date (transfers and excluded txns included — they all
+// moved money). Returns null when no anchor has been set.
+function accountBalance(acct){
+  if (!acct || acct.anchorBal == null || !acct.anchorDate) return null;
+  let bal = acct.anchorBal;
+  for (const id in DATA.txns){
+    const t = DATA.txns[id];
+    if (t.deleted || t.acct !== acct.id) continue;
+    if (t.date > acct.anchorDate) bal += t.amt;
+  }
+  return bal;
+}
+const ACCT_TYPES = [['checking', 'Checking'], ['savings', 'Savings'], ['investment', 'Investment'], ['credit', 'Credit card']];
+function acctTypeLabel(t){ const e = ACCT_TYPES.find((x) => x[0] === t); return e ? e[1] : (t || ''); }
 function acctOptions(sel){
   const list = liveAccounts().slice();
   if (sel && DATA.accounts[sel] && !list.some((a) => a.id === sel)) list.push(DATA.accounts[sel]);
@@ -1473,8 +1491,7 @@ function importOneFile(a){
         acctOptions(acctId) + '<option value="__new">＋ New account…</option></select></label>' +
         '<div data-x="newacct" style="display:none;margin-bottom:10px"><div class="row">' +
         '<input type="text" data-x="nname" placeholder="Account name" class="grow">' +
-        '<select data-x="ntype" style="max-width:130px"><option value="credit">Credit card</option>' +
-        '<option value="checking">Checking</option><option value="savings">Savings</option></select>' +
+        '<select data-x="ntype" style="max-width:140px">' + ACCT_TYPES.map(([v, l]) => '<option value="' + v + '">' + l + '</option>').join('') + '</select>' +
         '<button class="btn btn-sm" data-x="nadd">Add</button></div></div>' +
         '<div style="margin-bottom:10px"><span class="chip' + (customOpen ? '' : ' on') + '" data-x="preset">' +
         (a.preset ? esc(a.preset.label) + ' · tap to adjust' : 'Custom mapping') + '</span></div>';
@@ -1577,25 +1594,65 @@ function renderHome(){
     '<div class="stat"><div class="v amt-pos">' + fmt$(st.income) + '</div><div class="l">Income ' + esc(UI.year) + '</div></div>' +
     '<div class="stat"><div class="v">' + fmt$(st.spend) + '</div><div class="l">Spent ' + esc(UI.year) + '</div></div></div>';
 
-  const rate = st.income > 0 ? Math.round(100 * st.net / st.income) : null;
+  // Balances roll-up (only when at least one account balance is set).
+  {
+    let cash = 0, invest = 0, credit = 0, anyBal = false;
+    for (const a of liveAccounts()){
+      const bal = accountBalance(a);
+      if (bal == null) continue;
+      anyBal = true;
+      if (a.type === 'credit') credit += bal; else if (a.type === 'investment') invest += bal; else cash += bal;
+    }
+    if (anyBal){
+      html += '<div class="card" data-x="bal" style="cursor:pointer"><div class="row"><span style="font-size:18px">🏦</span>' +
+        '<div class="grow"><b>' + fmt$(cash + invest + credit) + '</b> across accounts' +
+        '<div class="tiny">' + fmt$(cash) + ' cash · ' + fmt$(invest) + ' invested' + (credit !== 0 ? ' · ' + fmt$(credit) + ' cards' : '') + '</div></div>' +
+        '<span class="menu-chev">›</span></div></div>';
+    }
+  }
+
+  // Bottom Line lens: overall / recurring / one-off — same tracking read on a
+  // narrowed slice of the money.
+  const incRecur = st.incomeRecur, incOne = st.income - st.incomeRecur;
+  const spRecur = st.spend - st.spendOneTimeAgg, spOne = st.spendOneTimeAgg;
+  const lens = HOME_BL === 'recurring'
+      ? { inc: incRecur, sp: spRecur, label: 'recurring' }
+    : HOME_BL === 'oneoff'
+      ? { inc: incOne, sp: spOne, label: 'one-off' }
+    : { inc: st.income, sp: st.spend, label: 'overall' };
+  const lNet = lens.inc - lens.sp;
+  const lRate = lens.inc > 0 ? Math.round(100 * lNet / lens.inc) : null;
   html += '<div class="card"><h3>The bottom line</h3>' +
-    '<p style="margin:0 0 6px">Net so far: <b style="color:' + (st.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(st.net, { signed: true }) + '</b>' +
-    (rate !== null ? ' <span class="muted">(' + (st.net >= 0 ? 'saving ' + rate + '% of income' : 'spending above income') + ')</span>' : '') + '</p>' +
-    (st.proj
-      ? '<p style="margin:0 0 6px">At your recent pace — ' + fmt$(st.proj.rateSpend) + '/mo out, ' + fmt$(st.proj.rateIncome) + '/mo in — you’ll end ' + esc(UI.year) + ' around ' +
-        '<b style="color:' + (st.proj.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(st.proj.net, { signed: true }) + '</b>' +
-        (st.proj.net >= 0 ? ' — on pace to come out ahead.' : ' — on pace to go under; “Where to cut” below.') + '</p>' +
-        '<p class="tiny" style="margin:0 0 6px">Pace = what recurs: everyday spending (dining, gifts you give) and paychecks. One-time things — seed money, gifts received, wedding &amp; house costs — count for what already happened but don’t project. Change any item’s setting in its editor (“Count in future estimates?”).</p>'
-      : '') +
+    '<div class="seg" style="margin-bottom:10px">' +
+    '<button data-bl="overall" class="' + (HOME_BL === 'overall' ? 'on' : '') + '">Overall</button>' +
+    '<button data-bl="recurring" class="' + (HOME_BL === 'recurring' ? 'on' : '') + '">Recurring</button>' +
+    '<button data-bl="oneoff" class="' + (HOME_BL === 'oneoff' ? 'on' : '') + '">One-off</button></div>' +
+    '<p style="margin:0 0 6px">' + (lens.label === 'overall' ? 'Net' : lens.label[0].toUpperCase() + lens.label.slice(1) + ' net') + ' so far: ' +
+    '<b style="color:' + (lNet >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(lNet, { signed: true }) + '</b> ' +
+    '<span class="muted">(' + fmt$(lens.inc) + ' in · ' + fmt$(lens.sp) + ' out' + (lRate !== null && lNet >= 0 ? ' · keeping ' + lRate + '%' : '') + ')</span></p>' +
+    (HOME_BL === 'recurring'
+      ? (st.proj
+          ? '<p style="margin:0 0 6px">At your recurring pace — ' + fmt$(st.proj.rateSpend) + '/mo out, ' + fmt$(st.proj.rateIncome) + '/mo in — you’ll end ' + esc(UI.year) + ' around ' +
+            '<b style="color:' + (st.proj.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(st.proj.net, { signed: true }) + '</b>' +
+            (st.proj.net >= 0 ? ' — on pace to come out ahead.' : ' — on pace to go under.') + '</p>'
+          : '') +
+        '<p class="tiny" style="margin:0">This is the sustainable picture: paychecks vs bills &amp; everyday spending. It’s what your finances look like once the one-offs are stripped out.</p>'
+      : HOME_BL === 'oneoff'
+      ? '<p class="tiny" style="margin:0">One-time money only — seed transfers, gifts received, wedding &amp; house costs. It doesn’t repeat, so there’s no forward pace; this is the net effect of the year’s big irregular events.</p>'
+      : (st.proj
+          ? '<p style="margin:0 0 6px">At your recent pace — ' + fmt$(st.proj.rateSpend) + '/mo out, ' + fmt$(st.proj.rateIncome) + '/mo in — you’ll end ' + esc(UI.year) + ' around ' +
+            '<b style="color:' + (st.proj.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(st.proj.net, { signed: true }) + '</b>' +
+            (st.proj.net >= 0 ? ' — on pace to come out ahead.' : ' — on pace to go under; “Where to cut” below.') + '</p>' +
+            '<p class="tiny" style="margin:0 0 6px">Pace projects only what recurs; toggle <b>Recurring</b> for the sustainable view or <b>One-off</b> for the windfalls &amp; big events.</p>'
+          : '')) +
     (() => {
       const negs = st.months.filter((ym) => agg[ym].spendTotal < 0);
       return negs.length
-        ? '<p style="margin:0 0 6px;color:var(--status-crit)">⚠️ ' + negs.map(fmtMonth).join(', ') +
-          (negs.length > 1 ? ' show' : ' shows') + ' <b>negative total spending</b> — a money-in transaction is sitting in a spending category (or an expense imported backwards). Every number here is off until it’s fixed. More → Data health lists the culprits.</p>'
+        ? '<p style="margin:6px 0 0;color:var(--status-crit)">⚠️ ' + negs.map(fmtMonth).join(', ') +
+          (negs.length > 1 ? ' show' : ' shows') + ' <b>negative total spending</b> — a money-in transaction is sitting in a spending category (or an expense imported backwards). More → Data health lists the culprits.</p>'
         : '';
     })() +
-    (st.invest > 0 ? '<p class="muted" style="margin:0 0 6px">📈 Plus ' + fmt$(st.invest) + ' invested — kept separate from spending.</p>' : '') +
-    (st.oneTime > 0 ? '<p class="muted" style="margin:0">🏠 One-time house / big-event spending: ' + fmt$(st.oneTime) + ' — excluded from your baseline.</p>' : '') +
+    (HOME_BL === 'overall' && st.invest > 0 ? '<p class="muted" style="margin:6px 0 0">📈 Plus ' + fmt$(st.invest) + ' invested — kept separate from spending.</p>' : '') +
     '</div>';
 
   if (rq.length){
@@ -1681,6 +1738,8 @@ function renderHome(){
   on('[data-x=rev]', () => showTab('review'));
   on('[data-x=recur]', () => openScreen('Recurring', renderRecurringScreen));
   on('[data-x=import]', () => openScreen('Import', renderImportScreen));
+  on('[data-x=bal]', () => openScreen('Accounts', renderAccountsScreen));
+  c.querySelectorAll('[data-bl]').forEach((b) => { b.onclick = () => { HOME_BL = b.dataset.bl; renderHome(); }; });
   c.querySelectorAll('[data-cat]').forEach((n2) => {
     n2.onclick = () => {
       if (n2.dataset.cat === '__uncat'){ showTab('review'); return; }
@@ -1690,8 +1749,9 @@ function renderHome(){
   c.querySelectorAll('[data-ym]').forEach((n2) => {
     n2.onclick = () => { UI.month = n2.dataset.ym; openScreen('Monthly detail', renderMonthScreen); };
   });
+  // Tapping a bar opens that month's full page (not just a caption).
   c.querySelectorAll('[data-m]').forEach((r2) => {
-    r2.onclick = () => { TRENDS_SEL.month = r2.dataset.m; renderHome(); };
+    r2.onclick = () => { UI.month = r2.dataset.m; openScreen('Monthly detail', renderMonthScreen); };
   });
 }
 
@@ -1718,6 +1778,26 @@ function renderMonthScreen(c){
         '<div class="l">Budget left</div><div class="tiny">of ' + fmt$(totalBudget) + '</div></div>'
       : '<div class="stat" data-x="setb" style="cursor:pointer"><div class="v">→</div><div class="l">Set budgets</div>' +
         '<div class="tiny">Baseline & budgets</div></div>') + '</div>';
+
+  // Month bottom line — the same recurring / one-off read, for this month.
+  const mNet = (mAgg.incomeTotal || 0) - (mAgg.spendTotal || 0);
+  const mRecurIn = mAgg.incomeRecur || 0, mOneIn = (mAgg.incomeTotal || 0) - mRecurIn;
+  const mRecurSp = (mAgg.spendTotal || 0) - (mAgg.spendOneTime || 0), mOneSp = mAgg.spendOneTime || 0;
+  html += '<div class="card"><h3>' + fmtMonth(UI.month) + ' bottom line</h3>' +
+    '<p style="margin:0 0 6px">Net: <b style="color:' + (mNet >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(mNet, { signed: true }) + '</b> ' +
+    '<span class="muted">(' + fmt$(mAgg.incomeTotal || 0) + ' in · ' + fmt$(mAgg.spendTotal || 0) + ' out)</span></p>' +
+    ((mOneIn || mOneSp)
+      ? '<p class="tiny" style="margin:0 0 4px">Recurring: ' + fmt$(mRecurIn) + ' in · ' + fmt$(mRecurSp) + ' out. &nbsp; One-off: ' + fmt$(mOneIn) + ' in · ' + fmt$(mOneSp) + ' out.</p>'
+      : '') +
+    ((mAgg.investTotal || 0) > 0 ? '<p class="tiny" style="margin:0;color:var(--blue)">📈 Invested ' + fmt$(mAgg.investTotal) + ' — separate from spending.</p>' : '') +
+    '</div>';
+
+  // Charts for this month's year, with the viewed month highlighted; tapping a
+  // bar walks to that month's page.
+  const yr = UI.month.slice(0, 4);
+  const yrMonths = Object.keys(agg).filter((k) => k.slice(0, 4) === yr).sort();
+  if (yrMonths.length > 1) html += yearChartsHTML(agg, yrMonths, UI.month, baseline);
+
   const rows = [];
   for (const cat of liveCats()){
     if ((cat.kind || 'expense') !== 'expense') continue;
@@ -1748,9 +1828,6 @@ function renderMonthScreen(c){
   } else {
     html += '<div class="empty">No activity in ' + fmtMonth(UI.month) + '.</div>';
   }
-  if ((mAgg.investTotal || 0) > 0)
-    html += '<div class="card"><div class="row"><span style="font-size:18px">📈</span>' +
-      '<div class="grow muted">Invested this month: <b style="color:var(--text)">' + fmt$(mAgg.investTotal) + '</b></div></div></div>';
   html += monthVsBaselineHTML(agg, UI.month, baseline);
   html += '<button class="btn btn-block" data-x="alla" style="margin-bottom:16px">Open ' + fmtMonth(UI.month) + ' in Activity →</button>';
   c.innerHTML = html;
@@ -1765,6 +1842,10 @@ function renderMonthScreen(c){
   on('[data-x=gob]', () => openScreen('Budgets & Baseline', renderBudgetsScreen));
   c.querySelectorAll('.list-item[data-cat]').forEach((n2) => {
     n2.onclick = () => { ACT.cat = n2.dataset.cat; ACT.month = UI.month; showTab('activity'); };
+  });
+  // Tapping a chart bar walks to that month's page.
+  c.querySelectorAll('[data-m]').forEach((r2) => {
+    r2.onclick = () => { UI.month = r2.dataset.m; renderMonthScreen(c); };
   });
 }
 /* ---- §Review (two modes: auto-sort queue + manual verify pass) ---- */
@@ -2221,7 +2302,8 @@ function yearChartsHTML(agg, months, sel, baseline){
     (sOne > 0 ? ' (' + fmt$(sRecur) + ' recurring + ' + fmt$(sOne) + ' one-time)' : '') +
     ' · Income ' + fmt$(sA.incomeTotal) +
     (iOne > 0 ? ' (' + fmt$(iRecur) + ' recurring + ' + fmt$(iOne) + ' one-off)' : '') +
-    ' · Net <b style="color:' + (net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(net, { signed: true }) + '</b></div></div>';
+    ' · Net <b style="color:' + (net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(net, { signed: true }) + '</b>' +
+    '<br><span style="color:var(--faint)">Tap any bar to open that month.</span></div></div>';
 
   /* -- card 2: where it goes, top-4 category lines + Other -- */
   const totals = {};
@@ -2670,21 +2752,44 @@ function renderCatsScreen(c){
 }
 
 /* ---- Accounts screen ---- */
+const acctIcon = (t) => t === 'credit' ? '💳' : t === 'investment' ? '📈' : t === 'savings' ? '🏦' : '🏦';
 function renderAccountsScreen(c){
   const counts = {};
   for (const t of liveTxns()) counts[t.acct] = (counts[t.acct] || 0) + 1;
-  const accts = Object.values(DATA.accounts).filter((a) => !a.deleted);
-  c.innerHTML = '<div class="card"><h3>Accounts</h3>' +
-    (accts.length ? accts.map((a) =>
-      '<div class="list-item" data-aid="' + esc(a.id) + '"><span class="ic">' + (a.type === 'credit' ? '💳' : '🏦') + '</span>' +
+  const accts = Object.values(DATA.accounts).filter((a) => !a.deleted).sort((a, b) => (a.archived?1:0) - (b.archived?1:0));
+  // Household roll-up: cash (checking+savings) + investments − credit owed.
+  let cash = 0, invest = 0, credit = 0, anyBal = false;
+  for (const a of accts){
+    if (a.archived) continue;
+    const bal = accountBalance(a);
+    if (bal == null) continue;
+    anyBal = true;
+    if (a.type === 'credit') credit += bal; else if (a.type === 'investment') invest += bal; else cash += bal;
+  }
+  const netWorth = cash + invest + credit; // credit balance is negative when owed
+  let html = '';
+  if (anyBal){
+    html += '<div class="stat" style="margin-bottom:12px"><div class="v">' + fmt$(netWorth) + '</div>' +
+      '<div class="l">net across accounts</div>' +
+      '<div class="tiny">' + fmt$(cash) + ' cash · ' + fmt$(invest) + ' invested' + (credit !== 0 ? ' · ' + fmt$(credit) + ' cards' : '') + '</div></div>';
+  }
+  html += '<div class="card"><h3>Accounts</h3>' +
+    (accts.length ? accts.map((a) => {
+      const bal = accountBalance(a);
+      return '<div class="list-item" data-aid="' + esc(a.id) + '"><span class="ic">' + acctIcon(a.type) + '</span>' +
       '<div class="body"><div class="t1">' + esc(a.name) + (a.archived ? ' <span class="tiny">(archived)</span>' : '') + '</div>' +
-      '<div class="t2">' + esc(a.type || '') + ' · ' + (counts[a.id] || 0) + ' transactions</div></div><span class="menu-chev">›</span></div>').join('')
+      '<div class="t2">' + esc(acctTypeLabel(a.type)) + ' · ' + (counts[a.id] || 0) + ' transactions</div></div>' +
+      (bal == null ? '<span class="tiny" style="color:var(--faint)">set balance ›</span>'
+                   : '<span class="amt"' + (bal < 0 ? ' style="color:var(--status-crit)"' : '') + '>' + fmt$(bal) + '</span>') +
+      '</div>';
+    }).join('')
       : '<p class="muted" style="margin:0">Accounts are created during import — or add one below.</p>') +
-    '</div><div class="card"><h3>Add account</h3><div class="row">' +
+    '<p class="tiny" style="margin:8px 0 0">Tap an account to set its balance. Nest shows the current balance = what you enter + every transaction since that date.</p></div>' +
+    '<div class="card"><h3>Add account</h3><div class="row">' +
     '<input type="text" data-x="nm" placeholder="e.g. Chase Sapphire" class="grow">' +
-    '<select data-x="ty" style="max-width:130px"><option value="credit">Credit card</option>' +
-    '<option value="checking">Checking</option><option value="savings">Savings</option></select>' +
+    '<select data-x="ty" style="max-width:140px">' + ACCT_TYPES.map(([v, l]) => '<option value="' + v + '">' + l + '</option>').join('') + '</select>' +
     '<button class="btn btn-sm" data-x="add">Add</button></div></div>';
+  c.innerHTML = html;
   c.querySelector('[data-x=add]').onclick = () => {
     const name = c.querySelector('[data-x=nm]').value.trim();
     if (!name) return;
@@ -2695,16 +2800,25 @@ function renderAccountsScreen(c){
     n2.onclick = () => {
       const a = DATA.accounts[n2.dataset.aid];
       if (!a) return;
+      const balDollars = a.anchorBal != null ? (a.anchorBal / 100) : '';
       const m = modal('Edit account',
         '<label class="fld"><span>Name</span><input type="text" data-x="nm" value="' + esc(a.name) + '"></label>' +
         '<label class="fld"><span>Type</span><select data-x="ty">' +
-        ['credit', 'checking', 'savings'].map((t2) => '<option value="' + t2 + '"' + (a.type === t2 ? ' selected' : '') + '>' + t2 + '</option>').join('') +
-        '</select></label><div class="row"><button class="btn grow" data-x="sv">Save</button>' +
+        ACCT_TYPES.map(([v, l]) => '<option value="' + v + '"' + (a.type === v ? ' selected' : '') + '>' + l + '</option>').join('') +
+        '</select></label>' +
+        '<div class="row"><label class="fld grow"><span>Balance' + (a.type === 'credit' ? ' owed (use −)' : '') + '</span>' +
+        '<input type="number" step="0.01" inputmode="decimal" data-x="bal" value="' + balDollars + '" placeholder="e.g. 5000"></label>' +
+        '<label class="fld grow"><span>As of date</span><input type="date" data-x="bd" value="' + esc(a.anchorDate || currentYM() + '-01') + '"></label></div>' +
+        '<p class="tiny" style="margin:0 0 12px">Enter the balance from your bank and the date it was true. Nest adds every transaction since to keep it current.</p>' +
+        '<div class="row"><button class="btn grow" data-x="sv">Save</button>' +
         '<button class="btn btn-danger grow" data-x="ar">' + (a.archived ? 'Unarchive' : 'Archive') + '</button></div>');
       m.node.querySelector('[data-x=sv]').onclick = () => {
         const name = m.node.querySelector('[data-x=nm]').value.trim();
         if (!name) return;
         a.name = name; a.type = m.node.querySelector('[data-x=ty]').value;
+        const bv = m.node.querySelector('[data-x=bal]').value.trim();
+        if (bv === '') { delete a.anchorBal; delete a.anchorDate; }
+        else { a.anchorBal = parseAmountCents(bv); a.anchorDate = m.node.querySelector('[data-x=bd]').value || (currentYM() + '-01'); }
         put('accounts', a); m.close(); renderAccountsScreen(c);
       };
       m.node.querySelector('[data-x=ar]').onclick = () => {
