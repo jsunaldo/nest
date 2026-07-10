@@ -216,7 +216,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v2.6'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v2.7'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -697,7 +697,7 @@ function buildMonthAgg(){
   for (const t of liveTxns()){
     if (t.status === 'excluded') continue;
     const ym = ymOf(t.date);
-    const bucket = out[ym] || (out[ym] = { spend: {}, spendTotal: 0, incomeTotal: 0, investTotal: 0,
+    const bucket = out[ym] || (out[ym] = { spend: {}, income: {}, invest: {}, spendTotal: 0, incomeTotal: 0, investTotal: 0,
                                            incomeRecur: 0, spendOneTime: 0 });
     for (const part of effParts(t)){
       // Unknown money-IN must never count as negative spending (or as income) —
@@ -706,10 +706,11 @@ function buildMonthAgg(){
       if (part.cat === '__uncat' && part.amt > 0) continue;
       const kind = part.cat === '__uncat' ? 'expense' : catKind(part.cat);
       if (kind === 'transfer') continue;
-      if (kind === 'invest'){ bucket.investTotal -= part.amt; continue; } // net invested; sells reduce it
+      if (kind === 'invest'){ bucket.investTotal -= part.amt; bucket.invest[part.cat] = (bucket.invest[part.cat] || 0) - part.amt; continue; } // net invested; sells reduce it
       const projects = txnProjects(t, part.cat);
       if (kind === 'income'){
         bucket.incomeTotal += part.amt;
+        bucket.income[part.cat] = (bucket.income[part.cat] || 0) + part.amt;
         if (projects) bucket.incomeRecur += part.amt; // seed money / gifts / windfalls never project
         continue;
       }
@@ -783,12 +784,14 @@ function yearStats(agg, year){
   const cur = currentYM();
   const months = Object.keys(agg).filter((ym) => ym.slice(0, 4) === year).sort();
   const st = { year, months, fullMonths: months.filter((ym) => ym < cur),
-               spend: 0, income: 0, invest: 0, oneTime: 0, byCat: {}, perMonth: [] };
+               spend: 0, income: 0, invest: 0, oneTime: 0, byCat: {}, incomeByCat: {}, investByCat: {}, perMonth: [] };
   for (const ym of months){
     const a = agg[ym];
     st.spend += a.spendTotal; st.income += a.incomeTotal; st.invest += (a.investTotal || 0);
     st.perMonth.push({ ym, spend: a.spendTotal, income: a.incomeTotal, net: a.incomeTotal - a.spendTotal });
     for (const cid in a.spend) st.byCat[cid] = (st.byCat[cid] || 0) + a.spend[cid];
+    for (const cid in (a.income || {})) st.incomeByCat[cid] = (st.incomeByCat[cid] || 0) + a.income[cid];
+    for (const cid in (a.invest || {})) st.investByCat[cid] = (st.investByCat[cid] || 0) + a.invest[cid];
   }
   for (const c of liveCats()){
     if ((c.kind || 'expense') === 'expense' && catExcludedFromEstimates(c)) st.oneTime += st.byCat[c.id] || 0;
@@ -1610,21 +1613,39 @@ function renderHome(){
       (baseline ? '' : ' — set budgets or a baseline to sharpen this') + '. 👏</p></div>';
   }
 
-  // "/mo avg" uses FULL months only — the current partial month must not drag
-  // a steady bill (mortgage) below its true monthly cost.
+  // Every category with any activity this year — money OUT shows as −, money IN
+  // as +. Net = income − spend per category (a refund-heavy expense cat can go +).
+  // "/mo avg" uses FULL months only so a partial current month can't dilute it.
   const fullN = st.fullMonths.length;
-  const catRows = Object.keys(st.byCat).map((cid) => ({
-    cid, total: st.byCat[cid],
-    fullTotal: st.fullMonths.reduce((s, ym) => s + (agg[ym].spend[cid] || 0), 0),
-  })).filter((x) => x.total > 0).sort((a, b) => b.total - a.total).slice(0, 8);
+  const catIds = new Set([...Object.keys(st.byCat), ...Object.keys(st.incomeByCat), ...Object.keys(st.investByCat)]);
+  const catRows = [];
+  for (const cid of catIds){
+    const inv = st.investByCat[cid] || 0;
+    if (inv !== 0 && !st.byCat[cid] && !st.incomeByCat[cid]){
+      catRows.push({ cid, invest: inv, mag: Math.abs(inv), isInvest: true }); continue; // investing isn't in/out
+    }
+    const net = (st.incomeByCat[cid] || 0) - (st.byCat[cid] || 0); // + in, − out
+    if (net === 0) continue;
+    catRows.push({ cid, net, mag: Math.abs(net) });
+  }
+  catRows.sort((a, b) => b.mag - a.mag);
   if (catRows.length){
-    html += '<div class="card"><h3>' + esc(UI.year) + ' by category</h3>' + catRows.map((x) => {
-      const cl = catLabel(x.cid);
-      const avgTxt = fullN ? fmt$(Math.round(x.fullTotal / fullN)) + '/mo avg over ' + fullN + ' full month' + (fullN > 1 ? 's' : '') : 'partial month only';
-      return '<div class="list-item" data-cat="' + esc(x.cid) + '"><span class="ic">' + cl.icon + '</span>' +
-        '<div class="body"><div class="t1">' + esc(cl.name) + '</div><div class="t2">' + avgTxt + '</div></div>' +
-        '<span class="amt">' + fmt$(x.total) + '</span></div>';
-    }).join('') + '</div>';
+    html += '<div class="card"><h3>' + esc(UI.year) + ' by category</h3>' +
+      '<p class="tiny" style="margin:0 0 6px">Every category with activity · <span style="color:var(--status-good)">+ in</span> / − out · <span style="color:var(--blue)">invested</span></p>' +
+      catRows.map((x) => {
+        const cl = catLabel(x.cid);
+        if (x.isInvest){
+          const avgI = fullN ? fmt$(Math.round(x.mag / fullN)) + '/mo invested' : 'partial month';
+          return '<div class="list-item" data-cat="' + esc(x.cid) + '"><span class="ic">' + cl.icon + '</span>' +
+            '<div class="body"><div class="t1">' + esc(cl.name) + '</div><div class="t2">' + avgI + '</div></div>' +
+            '<span class="amt" style="color:var(--blue)">' + fmt$(x.invest) + ' 📈</span></div>';
+        }
+        const pos = x.net >= 0;
+        const avgTxt = fullN ? fmt$(Math.round(x.mag / fullN)) + '/mo avg' : 'partial month';
+        return '<div class="list-item" data-cat="' + esc(x.cid) + '"><span class="ic">' + cl.icon + '</span>' +
+          '<div class="body"><div class="t1">' + esc(cl.name) + '</div><div class="t2">' + avgTxt + '</div></div>' +
+          '<span class="amt" style="color:' + (pos ? 'var(--status-good)' : 'var(--text)') + '">' + fmt$(x.net, { signed: true }) + '</span></div>';
+      }).join('') + '</div>';
   }
 
   html += '<div class="card"><h3>Month by month</h3>' + st.perMonth.slice().reverse().map((m) =>
@@ -2137,12 +2158,32 @@ function yearChartsHTML(agg, months, sel, baseline){
     s1 += '<line x1="' + padL + '" y1="' + gy + '" x2="' + (W1 - padR) + '" y2="' + gy + '" stroke="var(--line)"/>';
   }
   const barW = Math.max(4, Math.min(13, (colW - 10) / 2));
+  // Draw a bar as two stacked segments (recurring solid, one-time faded), bottom
+  // up, with a 2px surface gap between them; only the topmost segment is rounded.
+  const baseY = H1 - padB;
+  const stackBar = (x, segs, selected) => {
+    const nz = segs.filter((s) => s.v > 0);
+    let acc = 0, out = '';
+    segs.forEach((seg, i) => {
+      if (seg.v <= 0) return;
+      const isRecur = i === 0, topmost = seg === nz[nz.length - 1];
+      const top = yS(acc + seg.v);
+      let bot = yS(acc);
+      if (seg !== nz[0]) bot -= 2; // gap above the segment below
+      const op = selected ? (isRecur ? 1 : 0.5) : (isRecur ? 0.7 : 0.32);
+      if (topmost) out += barPath(x, top, barW, bot - top, seg.color, op);
+      else out += '<rect x="' + x.toFixed(1) + '" y="' + top.toFixed(1) + '" width="' + barW + '" height="' + Math.max(0, bot - top).toFixed(1) + '" fill="' + seg.color + '" opacity="' + op + '"/>';
+      acc += seg.v;
+    });
+    return out;
+  };
   months.forEach((ym, i) => {
     const cx = padL + i * colW + colW / 2;
-    const op = ym === sel ? '1' : '0.72';
-    const spTop = yS(agg[ym].spendTotal), inTop = yS(agg[ym].incomeTotal);
-    s1 += barPath(cx - barW - 1, spTop, barW, H1 - padB - spTop, 'var(--viz-1)', op);
-    s1 += barPath(cx + 1, inTop, barW, H1 - padB - inTop, 'var(--viz-2)', op);
+    const a = agg[ym], selected = ym === sel;
+    const spendRecur = Math.max(0, a.spendTotal - a.spendOneTime), spendOne = Math.max(0, a.spendOneTime);
+    const incRecur = Math.max(0, a.incomeRecur), incOne = Math.max(0, a.incomeTotal - a.incomeRecur);
+    s1 += stackBar(cx - barW - 1, [{ v: spendRecur, color: 'var(--viz-1)' }, { v: spendOne, color: 'var(--viz-1)' }], selected);
+    s1 += stackBar(cx + 1, [{ v: incRecur, color: 'var(--viz-2)' }, { v: incOne, color: 'var(--viz-2)' }], selected);
     if (n <= 8 || i % 2 === 0 || ym === sel)
       s1 += '<text x="' + cx.toFixed(1) + '" y="' + (H1 - 6) + '" text-anchor="middle" font-size="10" fill="var(--faint)">' + fmtMonth(ym).slice(0, 3) + '</text>';
     if (ym === sel)
@@ -2156,11 +2197,20 @@ function yearChartsHTML(agg, months, sel, baseline){
   }
   const sA = agg[sel];
   const net = sA.incomeTotal - sA.spendTotal;
+  const sRecur = sA.spendTotal - sA.spendOneTime, sOne = sA.spendOneTime;
+  const iRecur = sA.incomeRecur, iOne = sA.incomeTotal - sA.incomeRecur;
   const card1 =
     '<div class="card"><h3>Spending vs income</h3>' +
     '<div class="chart-wrap"><svg viewBox="0 0 ' + W1 + ' ' + H1 + '" width="100%" xmlns="http://www.w3.org/2000/svg">' + s1 + '</svg></div>' +
-    '<div class="legend"><span><i style="background:var(--viz-1)"></i>Spending</span><span><i style="background:var(--viz-2)"></i>Income</span></div>' +
-    '<div class="chart-caption">' + fmtMonth(sel) + ' — Spent ' + fmt$(sA.spendTotal) + ' · Income ' + fmt$(sA.incomeTotal) +
+    '<div class="legend">' +
+      '<span><i style="background:var(--viz-1)"></i>Recurring spend</span>' +
+      '<span><i style="background:var(--viz-1);opacity:.5"></i>One-time spend</span>' +
+      '<span><i style="background:var(--viz-2)"></i>Recurring income</span>' +
+      '<span><i style="background:var(--viz-2);opacity:.5"></i>One-off income</span></div>' +
+    '<div class="chart-caption">' + fmtMonth(sel) + ' — Spent ' + fmt$(sA.spendTotal) +
+    (sOne > 0 ? ' (' + fmt$(sRecur) + ' recurring + ' + fmt$(sOne) + ' one-time)' : '') +
+    ' · Income ' + fmt$(sA.incomeTotal) +
+    (iOne > 0 ? ' (' + fmt$(iRecur) + ' recurring + ' + fmt$(iOne) + ' one-off)' : '') +
     ' · Net <b style="color:' + (net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(net, { signed: true }) + '</b></div></div>';
 
   /* -- card 2: where it goes, top-4 category lines + Other -- */
