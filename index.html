@@ -216,7 +216,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v2.3'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v2.4'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -239,7 +239,10 @@ const GROUPS = [
 ];
 const SEED_CATS = [
   ['inc-pay',   'g-inc',  'Paycheck', '💵', 'income'],
-  ['inc-other', 'g-inc',  'Other Income', '💰', 'income'],
+  ['inc-other', 'g-inc',  'Other Income', '💰', 'income', true],
+  ['inc-seed',  'g-inc',  'Seed Money', '🏦', 'income', true],
+  ['inc-gift',  'g-inc',  'Gifts Received', '🎁', 'income', true],
+  ['inc-wedgift','g-inc', 'Wedding Gifts', '💝', 'income', true],
   ['hou-mort',  'g-hou',  'Mortgage / Rent', '🏠'],
   ['hou-util',  'g-hou',  'Utilities (other)', '💡'],
   ['hou-elec',  'g-hou',  'Electricity', '⚡'],
@@ -413,8 +416,8 @@ function softDelete(mapName, id){
 function seedIfEmpty(){
   // Upsert-if-missing, so new seed cats/rules reach EXISTING installs after an
   // app update. User-archived seeds stay archived (tombstone id still present).
-  for (const [id, group, name, icon, kind] of SEED_CATS)
-    if (!DATA.cats[id]) DATA.cats[id] = { id, group, name, icon, kind: kind || 'expense', updatedAt: SEED_TS };
+  for (const [id, group, name, icon, kind, oneTime] of SEED_CATS)
+    if (!DATA.cats[id]) DATA.cats[id] = { id, group, name, icon, kind: kind || 'expense', oneTime: !!oneTime, updatedAt: SEED_TS };
   SEED_RULES.forEach(([pattern, cat], i) => {
     const id = 'seed-r' + i;
     if (!DATA.rules[id]) DATA.rules[id] = { id, type: 'contains', pattern, cat, updatedAt: SEED_TS };
@@ -654,6 +657,33 @@ function effParts(t){
   if (t.splits && t.splits.length) return t.splits;
   return [{ cat: t.cat || '__uncat', amt: t.amt }];
 }
+// Does money in this category feed FUTURE estimates by default? One-time income
+// (seed money, gifts, windfalls) and one-time-outflow groups (House Setup, Big
+// Events/Wedding) do not; everything else — paychecks, mortgage, groceries,
+// even gifts you GIVE — does, because it realistically recurs.
+const ONE_TIME_INCOME = new Set(['inc-other', 'inc-seed', 'inc-gift', 'inc-wedgift']);
+function catProjectsDefault(catId){
+  if (catId === '__uncat') return true;
+  const c = DATA.cats[catId];
+  if (!c) return true;
+  if (ONE_TIME_INCOME.has(catId) || c.oneTime) return false;
+  const g = GROUPS.find((x) => x.id === c.group);
+  if (g && g.excludeFromBaseline) return false;
+  return true;
+}
+// Per-transaction override wins: projFuture true/false forces it; null = auto.
+function txnProjects(t, catId){
+  if (t.projFuture === true) return true;
+  if (t.projFuture === false) return false;
+  return catProjectsDefault(catId);
+}
+// Category is kept out of baseline/budget suggestions (natural-month math).
+function catExcludedFromEstimates(c){
+  if (!c) return false;
+  if (c.oneTime || ONE_TIME_INCOME.has(c.id)) return true;
+  const g = GROUPS.find((x) => x.id === c.group);
+  return !!(g && g.excludeFromBaseline);
+}
 // {ym: {spend: {catId: cents}, spendTotal, incomeTotal}} across all live, non-excluded txns.
 function buildMonthAgg(){
   const out = {};
@@ -670,15 +700,15 @@ function buildMonthAgg(){
       const kind = part.cat === '__uncat' ? 'expense' : catKind(part.cat);
       if (kind === 'transfer') continue;
       if (kind === 'invest'){ bucket.investTotal -= part.amt; continue; } // net invested; sells reduce it
+      const projects = txnProjects(t, part.cat);
       if (kind === 'income'){
         bucket.incomeTotal += part.amt;
-        if (part.cat !== 'inc-other') bucket.incomeRecur += part.amt; // windfalls/gifts-in never project forward
+        if (projects) bucket.incomeRecur += part.amt; // seed money / gifts / windfalls never project
         continue;
       }
       bucket.spend[part.cat] = (bucket.spend[part.cat] || 0) - part.amt;
       bucket.spendTotal -= part.amt;
-      const g = groupOf(part.cat);
-      if (g && g.excludeFromBaseline) bucket.spendOneTime -= part.amt; // house/wedding: real, but finite
+      if (!projects) bucket.spendOneTime -= part.amt; // wedding/house & anything marked one-time: real, but finite
     }
   }
   return out;
@@ -694,8 +724,7 @@ function baselineByCat(agg){
   const out = { months: months.length, cats: {}, total: 0 };
   for (const c of liveCats()){
     if ((c.kind || 'expense') !== 'expense') continue;
-    const g = GROUPS.find((x) => x.id === c.group);
-    if (g && g.excludeFromBaseline) continue;
+    if (catExcludedFromEstimates(c)) continue;
     const vals = months.map((ym) => (agg[ym].spend[c.id] || 0));
     const med = median(vals);
     if (med > 0){ out.cats[c.id] = med; out.total += med; }
@@ -723,6 +752,7 @@ function suggestBudgets(agg, year){
   if (!months.length) return out;
   for (const c of liveCats()){
     if ((c.kind || 'expense') !== 'expense') continue;
+    if (catExcludedFromEstimates(c)) continue;
     const vals = months.map((ym) => agg[ym].spend[c.id] || 0);
     const total = vals.reduce((s, v) => s + v, 0);
     if (total <= 0) continue;
@@ -754,8 +784,7 @@ function yearStats(agg, year){
     for (const cid in a.spend) st.byCat[cid] = (st.byCat[cid] || 0) + a.spend[cid];
   }
   for (const c of liveCats()){
-    const g = GROUPS.find((x) => x.id === c.group);
-    if (g && g.excludeFromBaseline) st.oneTime += st.byCat[c.id] || 0;
+    if ((c.kind || 'expense') === 'expense' && catExcludedFromEstimates(c)) st.oneTime += st.byCat[c.id] || 0;
   }
   st.net = st.income - st.spend;
   if (year === cur.slice(0, 4) && st.fullMonths.length){
@@ -789,8 +818,7 @@ function cutSuggestions(agg, year){
   if (!E) return out;
   for (const c of liveCats()){
     if ((c.kind || 'expense') !== 'expense') continue;
-    const g = GROUPS.find((x) => x.id === c.group);
-    if (g && g.excludeFromBaseline) continue;
+    if (catExcludedFromEstimates(c)) continue;
     const b = budgetFor(c.id, baseline);
     if (!b) continue;
     const ytdFull = st.fullMonths.reduce((s, ym) => s + (agg[ym].spend[c.id] || 0), 0);
@@ -1262,6 +1290,17 @@ function openTxnEditor(id){
       '<label class="fld grow"><span>Date</span><input type="date" data-x="date" value="' + esc(t.date) + '"></label>' +
       '<label class="fld grow"><span>Account</span><select data-x="acct">' + acctOptions(t.acct) + '</select></label>' +
     '</div>' +
+    (() => {
+      const eff = txnProjects(t, t.cat || (t.splits && t.splits[0] && t.splits[0].cat) || '__uncat');
+      const v = t.projFuture === true ? 'in' : t.projFuture === false ? 'out' : 'auto';
+      return '<label class="fld"><span>Count in future estimates? ' +
+        '<span class="tiny">(now: ' + (eff ? 'included' : 'excluded') + ')</span></span>' +
+        '<div class="seg" data-x="projseg">' +
+        '<button data-pf="auto" class="' + (v === 'auto' ? 'on' : '') + '">Auto</button>' +
+        '<button data-pf="in" class="' + (v === 'in' ? 'on' : '') + '">Always</button>' +
+        '<button data-pf="out" class="' + (v === 'out' ? 'on' : '') + '">Never</button></div>' +
+        '<span class="tiny">Auto follows the category. Set “Never” for one-time things (seed money, gifts, a wedding cost) so they don’t skew next month’s forecast.</span></label>';
+    })() +
     '<button class="btn btn-danger btn-block" data-x="del">Delete transaction</button>';
   const m = modal('Transaction', html);
   const q = (s) => m.node.querySelector(s);
@@ -1302,6 +1341,17 @@ function openTxnEditor(id){
   q('[data-x=note]').onchange = (e) => { t.note = e.target.value; put('txns', t); };
   q('[data-x=date]').onchange = (e) => { const d = parseDateISO(e.target.value); if (d){ t.date = d; put('txns', t); } };
   q('[data-x=acct]').onchange = (e) => { t.acct = e.target.value; put('txns', t); };
+  m.node.querySelectorAll('[data-pf]').forEach((b) => {
+    b.onclick = () => {
+      t.projFuture = b.dataset.pf === 'in' ? true : b.dataset.pf === 'out' ? false : null;
+      put('txns', t);
+      m.node.querySelectorAll('[data-pf]').forEach((x) => x.classList.toggle('on', x === b));
+      const eff = txnProjects(t, t.cat || (t.splits && t.splits[0] && t.splits[0].cat) || '__uncat');
+      const hint = m.node.querySelector('[data-x=projseg]').previousElementSibling;
+      if (hint) hint.innerHTML = 'Count in future estimates? <span class="tiny">(now: ' + (eff ? 'included' : 'excluded') + ')</span>';
+      renderCurrent();
+    };
+  });
   q('[data-x=del]').onclick = async () => {
     if (!(await confirmDlg('Delete this transaction? Re-importing the same statement will NOT bring it back.', 'Delete'))) return;
     softDelete('txns', t.id); m.close(); renderCurrent(); toast('Deleted');
@@ -1516,7 +1566,7 @@ function renderHome(){
       ? '<p style="margin:0 0 6px">At your recent pace — ' + fmt$(st.proj.rateSpend) + '/mo out, ' + fmt$(st.proj.rateIncome) + '/mo in — you’ll end ' + esc(UI.year) + ' around ' +
         '<b style="color:' + (st.proj.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(st.proj.net, { signed: true }) + '</b>' +
         (st.proj.net >= 0 ? ' — on pace to come out ahead.' : ' — on pace to go under; “Where to cut” below.') + '</p>' +
-        '<p class="tiny" style="margin:0 0 6px">Pace includes everyday spending (yes, gifts &amp; dining) but not one-time house/wedding costs; only paycheck-style income projects forward — windfalls count once.</p>'
+        '<p class="tiny" style="margin:0 0 6px">Pace = what recurs: everyday spending (dining, gifts you give) and paychecks. One-time things — seed money, gifts received, wedding &amp; house costs — count for what already happened but don’t project. Change any item’s setting in its editor (“Count in future estimates?”).</p>'
       : '') +
     (() => {
       const negs = st.months.filter((ym) => agg[ym].spendTotal < 0);
@@ -1757,6 +1807,19 @@ function renderVerifyMode(c){
       '<div class="card" style="background:var(--card2);margin-bottom:12px"><div class="list-item" data-x="cat" style="padding:6px 2px">' +
         '<span class="ic">' + cl.icon + '</span><div class="body"><div class="t1">' + esc(cl.name) + '</div>' +
         '<div class="t2">Category — tap to change</div></div><span class="menu-chev">›</span></div></div>' +
+      (() => {
+        // Only prompt about future-estimate inclusion where the answer isn't
+        // obvious: income, one-time-eligible categories, or already-overridden.
+        const primary = t.cat || (t.splits && t.splits[0] && t.splits[0].cat) || '__uncat';
+        const cc = DATA.cats[primary];
+        const relevant = (cc && (cc.kind || 'expense') === 'income') || catExcludedFromEstimates(cc) || t.projFuture != null;
+        if (!relevant) return '';
+        const eff = txnProjects(t, primary);
+        return '<div class="row" style="margin-bottom:12px;align-items:center">' +
+          '<span class="muted grow" style="font-size:12.5px">Count in future forecast?</span>' +
+          '<button class="btn btn-sm' + (eff ? ' btn-primary' : '') + '" data-x="pfin">Yes</button>' +
+          '<button class="btn btn-sm' + (!eff ? ' btn-primary' : '') + '" data-x="pfout">No</button></div>';
+      })() +
       '<button class="btn btn-primary btn-block" data-x="ok" style="margin-bottom:8px">✓ Looks correct</button>' +
       '<div class="row">' +
         '<button class="btn btn-sm grow" data-x="flip">⇄ Flip in/out</button>' +
@@ -1791,6 +1854,9 @@ function renderVerifyMode(c){
   q('[data-x=edit]').onclick = () => openTxnEditor(t.id);
   q('[data-x=transfer]').onclick = () => { t.cat = 'sys-transfer'; t.splits = null; if (t.status === 'review') t.status = 'ok'; put('txns', t); renderVerifyMode(c); };
   q('[data-x=excl]').onclick = () => { t.status = 'excluded'; put('txns', t); renderVerifyMode(c); };
+  const pfin = q('[data-x=pfin]'), pfout = q('[data-x=pfout]');
+  if (pfin) pfin.onclick = () => { t.projFuture = true; put('txns', t); renderVerifyMode(c); };
+  if (pfout) pfout.onclick = () => { t.projFuture = false; put('txns', t); renderVerifyMode(c); };
 }
 
 function renderSortMode(c){
@@ -2361,16 +2427,21 @@ function renderCatsScreen(c){
     n2.onclick = () => {
       const cat = DATA.cats[n2.dataset.cid];
       if (!cat) return;
+      const forcedOneTime = ONE_TIME_INCOME.has(cat.id) || (() => { const g = GROUPS.find((x) => x.id === cat.group); return !!(g && g.excludeFromBaseline); })();
       const m = modal('Edit category',
         '<label class="fld"><span>Name</span><input type="text" data-x="nm" value="' + esc(cat.name) + '"></label>' +
         '<label class="fld"><span>Icon</span><input type="text" data-x="ic" maxlength="4" value="' + esc(cat.icon || '') + '"></label>' +
+        '<label class="row" style="margin:0 0 12px"><input type="checkbox" data-x="ot" style="width:auto"' +
+          ((cat.oneTime || forcedOneTime) ? ' checked' : '') + (forcedOneTime ? ' disabled' : '') + '> ' +
+          '<span class="muted">One-time — exclude from future forecasts &amp; the baseline' + (forcedOneTime ? ' (always, for this group)' : '') + '</span></label>' +
         '<div class="row"><button class="btn grow" data-x="sv">Save</button>' +
         '<button class="btn btn-danger grow" data-x="ar">Archive</button></div>');
       m.node.querySelector('[data-x=sv]').onclick = () => {
         const name = m.node.querySelector('[data-x=nm]').value.trim();
         if (!name) return;
         cat.name = name; cat.icon = m.node.querySelector('[data-x=ic]').value.trim() || '•';
-        put('cats', cat); m.close(); renderCatsScreen(c);
+        if (!forcedOneTime) cat.oneTime = m.node.querySelector('[data-x=ot]').checked;
+        put('cats', cat); m.close(); renderCatsScreen(c); renderCurrent();
       };
       m.node.querySelector('[data-x=ar]').onclick = async () => {
         if (!(await confirmDlg('Archive “' + cat.name + '”? Existing transactions keep it; it just leaves the pickers.', 'Archive'))) return;
