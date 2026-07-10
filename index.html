@@ -216,7 +216,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v2.2'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v2.3'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1159,6 +1159,7 @@ function openSyncSettings(){ openScreen('Sync', renderSyncScreen); }
 /* ---- view module state ---- */
 let LAST_IMPORT_ACCT = null;
 const REVIEW_SKIP = new Set();
+const REVIEW = { mode: 'sort', month: null, acct: null }; // Review tab: auto-sort queue vs manual verify pass
 const ACT = { q: '', acct: null, cat: null, month: null, status: null, limit: 200, select: false, sel: new Set() };
 const TRENDS_SEL = { month: null };
 
@@ -1242,7 +1243,8 @@ function openTxnEditor(id){
         ' <span style="font-size:13px;font-weight:600;color:var(--dim)">' + (t.amt > 0 ? 'money IN' : 'money OUT') + '</span></div>' +
       '<div style="font-weight:700;overflow-wrap:anywhere">' + esc(t.m) + '</div>' +
       '<div class="tiny" style="overflow-wrap:anywhere">' + esc(t.mraw) + '</div>' +
-      '<div class="muted">' + fmtDate(t.date) + ' · ' + esc(accountName(t.acct)) + '</div>' +
+      '<div class="muted">' + fmtDate(t.date) + ' · ' + esc(accountName(t.acct)) +
+        (t.verified ? ' · <span style="color:var(--status-good)">✓ verified</span>' : '') + '</div>' +
       '<button class="btn btn-sm" data-x="flip" style="margin-top:8px">⇄ Flip to money ' + (t.amt > 0 ? 'OUT' : 'IN') + '</button>' +
     '</div>' +
     '<div class="card" style="padding:4px 12px;margin-bottom:10px"><div class="list-item" data-x="cat">' +
@@ -1677,13 +1679,125 @@ function renderMonthScreen(c){
     n2.onclick = () => { ACT.cat = n2.dataset.cat; ACT.month = UI.month; showTab('activity'); };
   });
 }
-/* ---- §Review ---- */
+/* ---- §Review (two modes: auto-sort queue + manual verify pass) ---- */
 function renderReview(){
   const c = $('#view-review');
+  const nSort = reviewTxns().length;
+  c.innerHTML =
+    '<div class="seg" style="margin-bottom:12px">' +
+    '<button data-x="msort" class="' + (REVIEW.mode === 'sort' ? 'on' : '') + '">Needs sorting' + (nSort ? ' · ' + nSort : '') + '</button>' +
+    '<button data-x="mverify" class="' + (REVIEW.mode === 'verify' ? 'on' : '') + '">Verify all</button></div>' +
+    '<div data-x="body"></div>';
+  c.querySelector('[data-x=msort]').onclick = () => { REVIEW.mode = 'sort'; renderReview(); };
+  c.querySelector('[data-x=mverify]').onclick = () => { REVIEW.mode = 'verify'; renderReview(); };
+  const body = c.querySelector('[data-x=body]');
+  if (REVIEW.mode === 'verify') return renderVerifyMode(body);
+  renderSortMode(body);
+}
+
+// Manual verification: walk every non-excluded transaction in a chosen window,
+// confirm each is correct. A t.verified timestamp tracks what's been validated.
+function verifyPool(){
+  return liveTxns().filter((t) => t.status !== 'excluded' &&
+    (!REVIEW.month || ymOf(t.date) === REVIEW.month) &&
+    (!REVIEW.acct || t.acct === REVIEW.acct));
+}
+function renderVerifyMode(c){
+  const months = dataMonths();
+  const accts = liveAccounts();
+  const pool = verifyPool();
+  const done = pool.filter((t) => t.verified).length;
+  const queue = pool.filter((t) => !t.verified).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+  let head = '<div class="month-strip">' +
+    '<span class="chip' + (!REVIEW.month ? ' on' : '') + '" data-mv="">All months</span>' +
+    months.map((ym) => '<span class="chip' + (REVIEW.month === ym ? ' on' : '') + '" data-mv="' + ym + '">' + fmtMonth(ym) + '</span>').join('') +
+    '</div>';
+  if (accts.length > 1){
+    head += '<div class="filter-row">' +
+      '<span class="chip' + (!REVIEW.acct ? ' on' : '') + '" data-av="">All accounts</span>' +
+      accts.map((a) => '<span class="chip' + (REVIEW.acct === a.id ? ' on' : '') + '" data-av="' + esc(a.id) + '">' + esc(a.name) + '</span>').join('') +
+      '</div>';
+  }
+  const scope = (REVIEW.month ? fmtMonth(REVIEW.month) : 'all months') + (REVIEW.acct ? ' · ' + accountName(REVIEW.acct) : '');
+  head += '<p class="muted" style="margin:0 0 10px">' + done + ' of ' + pool.length + ' verified in ' + scope +
+    (done ? ' · <a data-x="reset" style="cursor:pointer">reset</a>' : '') + '</p>';
+
+  function bind(){
+    c.querySelectorAll('[data-mv]').forEach((ch) => { ch.onclick = () => { REVIEW.month = ch.dataset.mv || null; renderVerifyMode(c); }; });
+    c.querySelectorAll('[data-av]').forEach((ch) => { ch.onclick = () => { REVIEW.acct = ch.dataset.av || null; renderVerifyMode(c); }; });
+    const rs = c.querySelector('[data-x=reset]');
+    if (rs) rs.onclick = async () => {
+      if (!(await confirmDlg('Clear the “verified” mark on all ' + done + ' transactions in ' + scope + '? (Only clears the checkmark — nothing else changes.)', 'Reset'))) return;
+      for (const t of pool) if (t.verified){ delete t.verified; put('txns', t); }
+      renderVerifyMode(c);
+    };
+    const oc = c.querySelector('.month-strip .chip.on');
+    if (oc && oc.scrollIntoView) oc.scrollIntoView({ inline: 'center', block: 'nearest' });
+  }
+
+  if (!pool.length){
+    c.innerHTML = head + '<div class="empty">No transactions in ' + scope + '.</div>';
+    bind(); return;
+  }
+  if (!queue.length){
+    c.innerHTML = head + '<div class="empty">✅ Every transaction in ' + scope + ' is verified.</div>';
+    bind(); return;
+  }
+  const t = queue[0];
+  const cl = (t.splits && t.splits.length) ? { icon: '🔀', name: t.splits.length + '-way split' } : catLabel(t.cat);
+  const dirIn = t.amt > 0;
+  c.innerHTML = head +
+    '<div class="card review-card">' +
+      '<div class="r-amt"' + (dirIn ? ' style="color:var(--status-good)"' : '') + '>' + fmt$(t.amt, { signed: dirIn }) +
+        ' <span style="font-size:13px;font-weight:600;color:var(--dim)">' + (dirIn ? 'money IN' : 'money OUT') + '</span></div>' +
+      '<div class="r-m">' + esc(t.m) + '</div>' +
+      '<div class="tiny" style="overflow-wrap:anywhere">' + esc(t.mraw) + '</div>' +
+      '<div class="muted" style="margin-bottom:14px">' + fmtDate(t.date) + ' · ' + esc(accountName(t.acct)) + '</div>' +
+      '<div class="card" style="background:var(--card2);margin-bottom:12px"><div class="list-item" data-x="cat" style="padding:6px 2px">' +
+        '<span class="ic">' + cl.icon + '</span><div class="body"><div class="t1">' + esc(cl.name) + '</div>' +
+        '<div class="t2">Category — tap to change</div></div><span class="menu-chev">›</span></div></div>' +
+      '<button class="btn btn-primary btn-block" data-x="ok" style="margin-bottom:8px">✓ Looks correct</button>' +
+      '<div class="row">' +
+        '<button class="btn btn-sm grow" data-x="flip">⇄ Flip in/out</button>' +
+        '<button class="btn btn-sm grow" data-x="split">Split…</button>' +
+        '<button class="btn btn-sm grow" data-x="edit">Edit…</button>' +
+      '</div>' +
+      '<div class="row" style="margin-top:8px">' +
+        '<button class="btn btn-sm grow" data-x="transfer">Transfer</button>' +
+        '<button class="btn btn-sm grow" data-x="excl">Exclude</button>' +
+      '</div>' +
+    '</div>' +
+    '<p class="muted" style="text-align:center">' + queue.length + ' left to verify in ' + scope + '</p>';
+  bind();
+  const q = (s) => c.querySelector(s);
+  const verifyAdvance = () => { t.verified = nowISO(); put('txns', t); renderVerifyMode(c); updateReviewBadge(); };
+  q('[data-x=ok]').onclick = verifyAdvance;
+  q('[data-x=cat]').onclick = async () => {
+    const cat = await openCatPicker({ merchant: t.m, showSystem: true });
+    if (!cat) return;
+    if (t.splits && t.splits.length){
+      if (!(await confirmDlg('Replace the existing split with one category?', 'Replace'))) return;
+      t.splits = null;
+    }
+    t.cat = cat; if (t.status === 'review') t.status = 'ok'; put('txns', t); renderVerifyMode(c);
+  };
+  q('[data-x=flip]').onclick = () => {
+    t.amt = -t.amt;
+    if (t.splits) t.splits = t.splits.map((p) => ({ cat: p.cat, amt: -p.amt, note: p.note }));
+    put('txns', t); renderVerifyMode(c); toast('Direction flipped');
+  };
+  q('[data-x=split]').onclick = () => openSplitEditor(t);
+  q('[data-x=edit]').onclick = () => openTxnEditor(t.id);
+  q('[data-x=transfer]').onclick = () => { t.cat = 'sys-transfer'; t.splits = null; if (t.status === 'review') t.status = 'ok'; put('txns', t); renderVerifyMode(c); };
+  q('[data-x=excl]').onclick = () => { t.status = 'excluded'; put('txns', t); renderVerifyMode(c); };
+}
+
+function renderSortMode(c){
   const queue = reviewTxns();
   if (!queue.length){
     REVIEW_SKIP.clear();
-    c.innerHTML = '<div class="empty">🎉 All caught up — nothing to review.</div>';
+    c.innerHTML = '<div class="empty">🎉 All caught up — nothing to sort.<br><span class="tiny">Use “Verify all” to double-check transactions that were auto-categorized.</span></div>';
     return;
   }
   let fresh = queue.filter((t) => !REVIEW_SKIP.has(t.id));
