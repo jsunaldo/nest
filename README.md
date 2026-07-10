@@ -1,0 +1,76 @@
+# Nest 🪺 — Household Finances
+
+A private, two-person expense tracker PWA. Import bank/card statements, auto-categorize
+with rules, review the stragglers card-by-card, and watch spending against your
+"natural budget" baseline. Local-first with end-to-end-encrypted sync between devices.
+
+**Live:** https://jsunaldo.github.io/nest · **Sync worker:** `nest-sync` (Cloudflare)
+
+## Privacy model
+
+- This repo holds **code only**. Financial data never touches GitHub.
+- Data lives in each device's local storage.
+- Sync (optional) pushes an **AES-256-GCM encrypted blob** to a Cloudflare Worker.
+  The encryption key is derived from your shared passphrase and never leaves your
+  devices — the server sees ciphertext, an entity count, and nothing else.
+- The room is claimed by the first writer's derived token; other passphrases get
+  locked out. **There is no passphrase reset** — a lost passphrase means starting a
+  new sync room (your local data is untouched).
+
+## Getting started (both phones)
+
+1. Open the live URL → Share → **Add to Home Screen** (installs the PWA).
+2. One of you: **More → Sync** → pick a shared passphrase (4+ random words).
+3. The other: same screen, **same passphrase** — the ledger appears.
+
+## The loop
+
+1. **Import** — download CSV from your bank/card site, drop it on More → Import.
+   Chase, Amex, Capital One, Citi, Discover, BofA and Apple Card are auto-detected;
+   anything else gets a column picker. Re-importing overlapping statements is safe —
+   duplicates are skipped.
+2. **Review** — anything without a rule lands in the Review tab. Pick a category
+   once per merchant ("Always" is pre-checked → creates a rule); split mixed charges
+   (looking at you, Amazon) across categories to the penny.
+3. **Read the dashboard** — month spend vs budget, category progress bars,
+   uncategorized banner, recurring subscriptions, trends vs your baseline.
+
+### PDF-only statements
+
+Ask Claude: *"Convert these statements to CSV with date, description, amount
+columns"* — then import the CSV normally.
+
+### Bulk triage with Claude
+
+More → **Claude bulk triage** → Copy digest → paste into any Claude chat → paste the
+rules JSON it returns back into the app. Clears a months-deep backlog in one pass.
+
+## The "natural budget" baseline
+
+More → **Budgets & Baseline** → set the window of pre-move months that reflect
+normal life. Baseline = your median month per category over that window (the
+**House Setup** group — furniture, renovation, moving — is excluded, so one-time
+new-house spending never pollutes it). Blank budgets fall back to baseline
+automatically; enter dollars to override.
+
+## Money rules (engine invariants)
+
+- All amounts are **integer cents**, signed (negative = money out). No float math.
+- Transfers & CC payments are excluded from spend/income so paying a card never
+  double-counts.
+- Refunds reduce their category's spend.
+- Splits must sum to the transaction total, to the penny, or Save stays disabled.
+- Deleting a transaction leaves a tombstone: re-importing the same statement will
+  not resurrect it.
+
+## Backup
+
+More → **Backup** exports a plain-JSON snapshot (keep it somewhere private).
+Import supports merge (newest edit wins) or full replace.
+
+## Development
+
+Single-file app: `index.html` (engines + views), `sw.js` (offline cache),
+`manifest.json`. Deploy = push to `main` (GitHub Pages). Sync backend:
+`../nest-sync/worker.js`, deployed with `npx wrangler deploy`. View-layer contract
+in `SPEC.md`. When editing `sw.js`-cached assets, bump `CACHE_NAME`.
