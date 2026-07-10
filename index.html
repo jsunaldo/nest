@@ -186,7 +186,6 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
   <div class="view" id="view-home"></div>
   <div class="view" id="view-review"></div>
   <div class="view" id="view-activity"></div>
-  <div class="view" id="view-trends"></div>
   <div class="view" id="view-more"></div>
 </div>
 
@@ -194,7 +193,6 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
   <button data-tab="home"><span class="ic">🏠</span>Home</button>
   <button data-tab="review"><span class="ic">🧾</span>Review<span class="nbadge" id="review-badge" style="display:none"></span></button>
   <button data-tab="activity"><span class="ic">📋</span>Activity</button>
-  <button data-tab="trends"><span class="ic">📈</span>Trends</button>
   <button data-tab="more"><span class="ic">⚙️</span>More</button>
 </nav>
 
@@ -1125,7 +1123,7 @@ function showTab(name){
 }
 function renderCurrent(){
   ({ home: renderHome, review: renderReview, activity: renderActivity,
-     trends: renderTrends, more: renderMore }[CURRENT_TAB])();
+     more: renderMore }[CURRENT_TAB])();
   updateReviewBadge();
 }
 function updateReviewBadge(){
@@ -1152,7 +1150,7 @@ function openSyncSettings(){ openScreen('Sync', renderSyncScreen); }
 /* ---- view module state ---- */
 let LAST_IMPORT_ACCT = null;
 const REVIEW_SKIP = new Set();
-const ACT = { q: '', acct: null, cat: null, month: null, limit: 200, select: false, sel: new Set() };
+const ACT = { q: '', acct: null, cat: null, month: null, status: null, limit: 200, select: false, sel: new Set() };
 const TRENDS_SEL = { month: null };
 
 /* ---- shared helpers ---- */
@@ -1509,6 +1507,13 @@ function renderHome(){
       '<div class="tiny">' + fmt$(rqOut) + ' not yet sorted — numbers above are incomplete until sorted</div></div><span class="menu-chev">›</span></div></div>';
   }
 
+  if (st.months.length){
+    let chartSel = TRENDS_SEL.month;
+    if (!chartSel || !st.months.includes(chartSel)) chartSel = st.months[st.months.length - 1];
+    TRENDS_SEL.month = chartSel;
+    html += yearChartsHTML(agg, st.months, chartSel, baseline);
+  }
+
   const cuts = cutSuggestions(agg, UI.year);
   if (cuts.length){
     html += '<div class="card"><h3>Where to cut</h3><p class="tiny" style="margin:0 0 6px">Most over their expected pace in ' + esc(UI.year) + ' (full months only)</p>' +
@@ -1520,14 +1525,19 @@ function renderHome(){
       (baseline ? '' : ' — set budgets or a baseline to sharpen this') + '. 👏</p></div>';
   }
 
-  const mDiv = Math.max(1, st.months.length);
-  const catRows = Object.keys(st.byCat).map((cid) => ({ cid, total: st.byCat[cid] }))
-    .filter((x) => x.total > 0).sort((a, b) => b.total - a.total).slice(0, 8);
+  // "/mo avg" uses FULL months only — the current partial month must not drag
+  // a steady bill (mortgage) below its true monthly cost.
+  const fullN = st.fullMonths.length;
+  const catRows = Object.keys(st.byCat).map((cid) => ({
+    cid, total: st.byCat[cid],
+    fullTotal: st.fullMonths.reduce((s, ym) => s + (agg[ym].spend[cid] || 0), 0),
+  })).filter((x) => x.total > 0).sort((a, b) => b.total - a.total).slice(0, 8);
   if (catRows.length){
     html += '<div class="card"><h3>' + esc(UI.year) + ' by category</h3>' + catRows.map((x) => {
       const cl = catLabel(x.cid);
+      const avgTxt = fullN ? fmt$(Math.round(x.fullTotal / fullN)) + '/mo avg over ' + fullN + ' full month' + (fullN > 1 ? 's' : '') : 'partial month only';
       return '<div class="list-item" data-cat="' + esc(x.cid) + '"><span class="ic">' + cl.icon + '</span>' +
-        '<div class="body"><div class="t1">' + esc(cl.name) + '</div><div class="t2">' + fmt$(Math.round(x.total / mDiv)) + '/mo avg</div></div>' +
+        '<div class="body"><div class="t1">' + esc(cl.name) + '</div><div class="t2">' + avgTxt + '</div></div>' +
         '<span class="amt">' + fmt$(x.total) + '</span></div>';
     }).join('') + '</div>';
   }
@@ -1563,6 +1573,9 @@ function renderHome(){
   });
   c.querySelectorAll('[data-ym]').forEach((n2) => {
     n2.onclick = () => { UI.month = n2.dataset.ym; openScreen('Monthly detail', renderMonthScreen); };
+  });
+  c.querySelectorAll('[data-m]').forEach((r2) => {
+    r2.onclick = () => { TRENDS_SEL.month = r2.dataset.m; renderHome(); };
   });
 }
 
@@ -1622,11 +1635,8 @@ function renderMonthScreen(c){
   if ((mAgg.investTotal || 0) > 0)
     html += '<div class="card"><div class="row"><span style="font-size:18px">📈</span>' +
       '<div class="grow muted">Invested this month: <b style="color:var(--text)">' + fmt$(mAgg.investTotal) + '</b></div></div></div>';
-  const monthTxns = liveTxns().filter((t) => t.status !== 'excluded' && ymOf(t.date) === UI.month)
-    .sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0)).slice(0, 8);
-  if (monthTxns.length)
-    html += '<div class="card"><h3>Activity</h3>' + monthTxns.map((t) => txnRowHTML(t)).join('') +
-      '<button class="btn btn-sm btn-block" data-x="alla" style="margin-top:8px">All of ' + fmtMonth(UI.month) + ' →</button></div>';
+  html += monthVsBaselineHTML(agg, UI.month, baseline);
+  html += '<button class="btn btn-block" data-x="alla" style="margin-bottom:16px">Open ' + fmtMonth(UI.month) + ' in Activity →</button>';
   c.innerHTML = html;
 
   c.querySelector('[data-x=prev]').onclick = () => { UI.month = shiftYM(UI.month, -1); renderMonthScreen(c); };
@@ -1636,7 +1646,7 @@ function renderMonthScreen(c){
   on('[data-x=setb]', () => openScreen('Budgets & Baseline', renderBudgetsScreen));
   on('[data-x=allb]', () => openScreen('Budgets & Baseline', renderBudgetsScreen));
   on('[data-x=alla]', () => { ACT.month = UI.month; ACT.cat = null; showTab('activity'); });
-  c.querySelectorAll('[data-txn]').forEach((n2) => { n2.onclick = () => openTxnEditor(n2.dataset.txn); });
+  on('[data-x=gob]', () => openScreen('Budgets & Baseline', renderBudgetsScreen));
   c.querySelectorAll('.list-item[data-cat]').forEach((n2) => {
     n2.onclick = () => { ACT.cat = n2.dataset.cat; ACT.month = UI.month; showTab('activity'); };
   });
@@ -1706,6 +1716,7 @@ function actFiltered(){
   return liveTxns().filter((t) => {
     if (ACT.acct && t.acct !== ACT.acct) return false;
     if (ACT.month && ymOf(t.date) !== ACT.month) return false;
+    if (ACT.status && t.status !== ACT.status) return false;
     if (ACT.cat){
       if (!effParts(t).some((p) => (p.cat || '__uncat') === ACT.cat)) return false;
     }
@@ -1713,22 +1724,68 @@ function actFiltered(){
     return true;
   }).sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : 0));
 }
+// Filter sheet: all Activity filters in one place instead of chip gymnastics.
+function openActFilters(){
+  const accts = liveAccounts();
+  let cat = ACT.cat, status = ACT.status || '';
+  const catTxt = (id) => id ? (id === '__uncat' ? '❓ Uncategorized' : catLabel(id).icon + ' ' + catLabel(id).name) : 'All categories';
+  const m = modal('Filter activity',
+    '<label class="fld"><span>Account</span><select data-x="fa"><option value="">All accounts</option>' +
+      accts.map((a) => '<option value="' + esc(a.id) + '"' + (ACT.acct === a.id ? ' selected' : '') + '>' + esc(a.name) + '</option>').join('') + '</select></label>' +
+    '<label class="fld"><span>Category</span></label>' +
+    '<button class="btn btn-block" data-x="fc" style="text-align:left;margin-bottom:10px">' + esc(catTxt(cat)) + '</button>' +
+    '<label class="fld"><span>Month (blank = all)</span><input type="month" data-x="fm" value="' + esc(ACT.month || '') + '"></label>' +
+    '<label class="fld"><span>Status</span></label>' +
+    '<div class="seg" style="margin-bottom:14px">' +
+      '<button data-fs="" class="' + (!status ? 'on' : '') + '">All</button>' +
+      '<button data-fs="review" class="' + (status === 'review' ? 'on' : '') + '">Needs review</button>' +
+      '<button data-fs="excluded" class="' + (status === 'excluded' ? 'on' : '') + '">Excluded</button></div>' +
+    '<div class="row"><button class="btn grow" data-x="reset">Reset all</button>' +
+    '<button class="btn btn-primary grow" data-x="apply">Apply</button></div>');
+  const q2 = (s) => m.node.querySelector(s);
+  q2('[data-x=fc]').onclick = async () => {
+    const picked = await openCatPicker({ showSystem: true, allowAll: true });
+    if (picked){ cat = picked === '__all' ? null : picked; q2('[data-x=fc]').textContent = catTxt(cat); }
+  };
+  m.node.querySelectorAll('[data-fs]').forEach((b) => {
+    b.onclick = () => {
+      status = b.dataset.fs;
+      m.node.querySelectorAll('[data-fs]').forEach((x) => x.classList.toggle('on', x === b));
+    };
+  });
+  q2('[data-x=reset]').onclick = () => {
+    ACT.acct = ACT.cat = ACT.month = ACT.status = null; ACT.limit = 200;
+    m.close(); renderActivity();
+  };
+  q2('[data-x=apply]').onclick = () => {
+    ACT.acct = q2('[data-x=fa]').value || null;
+    ACT.cat = cat;
+    const fm = q2('[data-x=fm]').value;
+    ACT.month = /^\d{4}-\d{2}$/.test(fm) ? fm : null;
+    ACT.status = status || null;
+    ACT.limit = 200;
+    m.close(); renderActivity();
+  };
+}
 function renderActivity(){
   const c = $('#view-activity');
-  const accts = liveAccounts();
   const catName = ACT.cat ? (ACT.cat === '__uncat' ? 'Uncategorized' : catLabel(ACT.cat).name) : null;
+  const nFilters = (ACT.acct ? 1 : 0) + (ACT.cat ? 1 : 0) + (ACT.month ? 1 : 0) + (ACT.status ? 1 : 0);
   let html =
-    '<input type="text" data-x="q" placeholder="Search merchants & notes…" value="' + esc(ACT.q) + '" style="margin-bottom:10px">' +
-    '<div class="filter-row">' +
-    '<span class="chip' + (ACT.acct ? ' on' : '') + '" data-x="facct">' +
-      (ACT.acct ? esc(accountName(ACT.acct)) + '<span class="tag-x">×</span>' : 'All accounts') + '</span>' +
-    '<span class="chip' + (ACT.cat ? ' on' : '') + '" data-x="fcat">' +
-      (catName ? esc(catName) + '<span class="tag-x">×</span>' : 'All categories') + '</span>' +
-    (ACT.month ? '<span class="chip on" data-x="fmprev">‹</span>' : '') +
-    '<span class="chip' + (ACT.month ? ' on' : '') + '" data-x="fmonth">' + (ACT.month ? fmtMonth(ACT.month) : 'All months') + '</span>' +
-    (ACT.month ? '<span class="chip on" data-x="fmnext">›</span>' : '') +
-    '<span class="chip' + (ACT.select ? ' on' : '') + '" data-x="fsel">' + (ACT.select ? 'Done' : 'Select') + '</span>' +
-    '</div><div data-x="list"></div>';
+    '<div class="row" style="margin-bottom:10px">' +
+    '<input type="text" data-x="q" placeholder="Search merchants & notes…" value="' + esc(ACT.q) + '" class="grow">' +
+    '<button class="btn btn-sm' + (nFilters ? ' btn-primary' : '') + '" data-x="fopen">Filter' + (nFilters ? ' · ' + nFilters : '') + '</button>' +
+    '<button class="btn btn-sm" data-x="fsel">' + (ACT.select ? 'Done' : 'Select') + '</button></div>';
+  if (nFilters){
+    html += '<div class="filter-row">' +
+      (ACT.acct ? '<span class="chip on" data-clear="acct">' + esc(accountName(ACT.acct)) + '<span class="tag-x">×</span></span>' : '') +
+      (ACT.cat ? '<span class="chip on" data-clear="cat">' + esc(catName) + '<span class="tag-x">×</span></span>' : '') +
+      (ACT.month ? '<span class="chip on" data-clear="month">' + fmtMonth(ACT.month) + '<span class="tag-x">×</span></span>' : '') +
+      (ACT.status ? '<span class="chip on" data-clear="status">' + (ACT.status === 'review' ? 'Needs review' : 'Excluded') + '<span class="tag-x">×</span></span>' : '') +
+      (nFilters > 1 ? '<span class="chip" data-clear="__all">Clear all</span>' : '') +
+      '</div>';
+  }
+  html += '<div data-x="list"></div>';
   c.innerHTML = html;
   const q = (s) => c.querySelector(s);
 
@@ -1801,29 +1858,15 @@ function renderActivity(){
     clearTimeout(qTimer);
     qTimer = setTimeout(() => { ACT.q = e.target.value; ACT.limit = 200; drawList(); }, 200);
   };
-  q('[data-x=facct]').onclick = () => {
-    if (ACT.acct) ACT.acct = null;
-    else if (accts.length){
-      ACT.acct = accts[0].id;
-    }
-    renderActivity(); return;
-  };
-  if (ACT.acct) q('[data-x=facct]').onclick = () => {
-    const i = accts.findIndex((a) => a.id === ACT.acct);
-    ACT.acct = (i >= 0 && i < accts.length - 1) ? accts[i + 1].id : null;
-    renderActivity();
-  };
-  q('[data-x=fcat]').onclick = async () => {
-    if (ACT.cat){ ACT.cat = null; renderActivity(); return; }
-    const cat = await openCatPicker({ showSystem: true, allowAll: true });
-    if (cat) ACT.cat = (cat === '__all') ? null : cat;
-    renderActivity();
-  };
-  q('[data-x=fmonth]').onclick = () => { ACT.month = ACT.month ? null : (UI.month || currentYM()); renderActivity(); };
-  const fp = q('[data-x=fmprev]'), fn2 = q('[data-x=fmnext]');
-  if (fp) fp.onclick = () => { ACT.month = shiftYM(ACT.month, -1); renderActivity(); };
-  if (fn2) fn2.onclick = () => { ACT.month = shiftYM(ACT.month, 1); renderActivity(); };
+  q('[data-x=fopen]').onclick = () => openActFilters();
   q('[data-x=fsel]').onclick = () => { ACT.select = !ACT.select; if (!ACT.select) ACT.sel.clear(); renderActivity(); };
+  c.querySelectorAll('[data-clear]').forEach((ch) => {
+    ch.onclick = () => {
+      if (ch.dataset.clear === '__all') ACT.acct = ACT.cat = ACT.month = ACT.status = null;
+      else ACT[ch.dataset.clear] = null;
+      renderActivity();
+    };
+  });
   drawList();
 }
 /* ---- §Trends ---- */
@@ -1837,19 +1880,11 @@ function barPath(x, yTop, w, hgt, color, opacity){
     ' Q' + (x + w).toFixed(1) + ',' + yTop.toFixed(1) + ' ' + (x + w).toFixed(1) + ',' + (yTop + r).toFixed(1) +
     ' L' + (x + w).toFixed(1) + ',' + (yTop + hgt).toFixed(1) + ' Z" fill="' + color + '" opacity="' + opacity + '"/>';
 }
-function renderTrends(){
-  const c = $('#view-trends');
-  const agg = buildMonthAgg();
-  const months = Object.keys(agg).sort().slice(-12);
-  if (!months.length){
-    c.innerHTML = '<div class="empty">Import statements first — trends appear here.</div>';
-    return;
-  }
-  if (!TRENDS_SEL.month || !months.includes(TRENDS_SEL.month)) TRENDS_SEL.month = months[months.length - 1];
-  const sel = TRENDS_SEL.month;
+// "Spending vs income" + "Where it goes" cards for the given months (rendered
+// on Home, scoped to the selected year). Caller binds taps via [data-m].
+function yearChartsHTML(agg, months, sel, baseline){
   const si = months.indexOf(sel);
   const n = months.length;
-  const baseline = baselineByCat(agg);
   const padT = 16, padB = 22, padL = 6, padR = 6;
 
   /* -- card 1: spending vs income, grouped bars -- */
@@ -1941,60 +1976,39 @@ function renderTrends(){
       '<div class="legend">' + series.map((se) => '<span><i style="background:' + se.color + '"></i>' + esc(se.name) + '</span>').join('') + '</div>' +
       '<div class="chart-caption">' + fmtMonth(sel) + ' — ' + series.map((se) => esc(se.name) + ' ' + fmt$(se.vals[si])).join(' · ') + '</div></div>';
   }
+  return card1 + card2;
+}
 
-  /* -- card 3: vs baseline table -- */
-  let card3;
-  if (baseline){
-    const rows3 = [];
-    for (const cat of liveCats()){
-      if ((cat.kind || 'expense') !== 'expense') continue;
-      const spent = sA.spend[cat.id] || 0;
-      const base = baseline.cats[cat.id] || 0;
-      if (!spent && !base) continue;
-      rows3.push({ name: cat.name, icon: cat.icon, spent, base });
-    }
-    rows3.sort((a, b) => b.spent - a.spent);
-    const tS = rows3.reduce((s, r) => s + r.spent, 0), tB = rows3.reduce((s, r) => s + r.base, 0);
-    const dCell = (spent, base) => {
-      if (!base) return '<td class="muted" style="text-align:right">—</td>';
-      const d = spent - base;
-      const col = spent > base * 1.05 ? 'var(--status-crit)' : spent < base ? 'var(--status-good)' : 'var(--dim)';
-      return '<td style="text-align:right;color:' + col + '">' + fmt$(d, { signed: true }) + '</td>';
-    };
-    card3 = '<div class="card"><h3>' + fmtMonth(sel) + ' vs your baseline</h3><div class="tbl-wrap"><table class="map-tbl">' +
-      '<tr><th>Category</th><th style="text-align:right">Month</th><th style="text-align:right">Baseline</th><th style="text-align:right">Δ</th></tr>' +
-      rows3.map((r) => '<tr><td>' + esc(r.icon || '') + ' ' + esc(r.name) + '</td>' +
-        '<td style="text-align:right">' + fmt$(r.spent) + '</td>' +
-        '<td style="text-align:right" class="muted">' + (r.base ? fmt$(r.base) : '—') + '</td>' + dCell(r.spent, r.base) + '</tr>').join('') +
-      '<tr><td><b>Total</b></td><td style="text-align:right"><b>' + fmt$(tS) + '</b></td>' +
-      '<td style="text-align:right"><b>' + fmt$(tB) + '</b></td>' + dCell(tS, tB) + '</tr></table></div>' +
-      '<div class="tiny" style="margin-top:6px">Baseline = your typical month, ' + fmtMonth(settings().baselineFrom) + '–' + fmtMonth(settings().baselineTo) + ' (House Setup excluded)</div></div>';
-  } else {
-    card3 = '<div class="card"><h3>Natural budget</h3><p class="muted" style="margin:0">Set your baseline window in ' +
+// "Month vs your baseline" table, used on the Monthly-detail screen.
+function monthVsBaselineHTML(agg, ym, baseline){
+  if (!baseline)
+    return '<div class="card"><h3>Natural budget</h3><p class="muted" style="margin:0">Set your baseline window in ' +
       '<a data-x="gob" style="cursor:pointer">Budgets &amp; Baseline</a> to compare every month against how you naturally spend.</p></div>';
+  const sA = agg[ym] || { spend: {} };
+  const rows3 = [];
+  for (const cat of liveCats()){
+    if ((cat.kind || 'expense') !== 'expense') continue;
+    const spent = sA.spend[cat.id] || 0;
+    const base = baseline.cats[cat.id] || 0;
+    if (!spent && !base) continue;
+    rows3.push({ name: cat.name, icon: cat.icon, spent, base });
   }
-
-  /* -- card 4: recurring teaser -- */
-  const rec = detectRecurring();
-  let card4 = '<div class="card"><h3>Recurring</h3>';
-  if (rec.length){
-    const recTotal = rec.reduce((s, r) => s + r.monthly, 0);
-    card4 += '<p class="muted" style="margin:0 0 6px">' + fmt$(recTotal) + '/mo across ' + rec.length + ' recurring charges</p>' +
-      rec.slice(0, 3).map((r) => '<div class="list-item"><span class="ic">' + catLabel(r.cat).icon + '</span>' +
-        '<div class="body"><div class="t1">' + esc(r.merchant) + '</div><div class="t2">' + r.period + ' · last ' + fmtDate(r.last) + '</div></div>' +
-        '<span class="amt">' + fmt$(r.monthly) + '/mo</span></div>').join('') +
-      '<button class="btn btn-sm btn-block" data-x="allrec" style="margin-top:8px">All recurring →</button>';
-  } else card4 += '<p class="muted" style="margin:0">No recurring charges detected yet — needs 3+ sightings of a merchant.</p>';
-  card4 += '</div>';
-
-  c.innerHTML = card1 + card2 + card3 + card4;
-  c.querySelectorAll('[data-m]').forEach((r2) => {
-    r2.onclick = () => { TRENDS_SEL.month = r2.dataset.m; renderTrends(); };
-  });
-  const gob = c.querySelector('[data-x=gob]');
-  if (gob) gob.onclick = () => openScreen('Budgets & Baseline', renderBudgetsScreen);
-  const ar = c.querySelector('[data-x=allrec]');
-  if (ar) ar.onclick = () => openScreen('Recurring', renderRecurringScreen);
+  rows3.sort((a, b) => b.spent - a.spent);
+  const tS = rows3.reduce((s, r) => s + r.spent, 0), tB = rows3.reduce((s, r) => s + r.base, 0);
+  const dCell = (spent, base) => {
+    if (!base) return '<td class="muted" style="text-align:right">—</td>';
+    const d = spent - base;
+    const col = spent > base * 1.05 ? 'var(--status-crit)' : spent < base ? 'var(--status-good)' : 'var(--dim)';
+    return '<td style="text-align:right;color:' + col + '">' + fmt$(d, { signed: true }) + '</td>';
+  };
+  return '<div class="card"><h3>' + fmtMonth(ym) + ' vs your baseline</h3><div class="tbl-wrap"><table class="map-tbl">' +
+    '<tr><th>Category</th><th style="text-align:right">Month</th><th style="text-align:right">Baseline</th><th style="text-align:right">Δ</th></tr>' +
+    rows3.map((r) => '<tr><td>' + esc(r.icon || '') + ' ' + esc(r.name) + '</td>' +
+      '<td style="text-align:right">' + fmt$(r.spent) + '</td>' +
+      '<td style="text-align:right" class="muted">' + (r.base ? fmt$(r.base) : '—') + '</td>' + dCell(r.spent, r.base) + '</tr>').join('') +
+    '<tr><td><b>Total</b></td><td style="text-align:right"><b>' + fmt$(tS) + '</b></td>' +
+    '<td style="text-align:right"><b>' + fmt$(tB) + '</b></td>' + dCell(tS, tB) + '</tr></table></div>' +
+    '<div class="tiny" style="margin-top:6px">Baseline = your typical month, ' + fmtMonth(settings().baselineFrom) + '–' + fmtMonth(settings().baselineTo) + ' (House Setup excluded)</div></div>';
 }
 /* ---- §More ---- */
 function renderMore(){
@@ -2012,6 +2026,7 @@ function renderMore(){
     ['🔁', 'Recurring', 'Subscriptions & repeat bills', () => openScreen('Recurring', renderRecurringScreen)],
     ['🏷️', 'Categories & Rules', 'Edit the sorting brain', () => openScreen('Categories & Rules', renderCatsScreen)],
     ['🏦', 'Accounts', 'Banks & cards', () => openScreen('Accounts', renderAccountsScreen)],
+    ['🩺', 'Data health', 'Find missing statements & gaps', () => openScreen('Data health', renderHealthScreen)],
     ['🤖', 'Claude bulk triage', 'Sort many merchants at once', () => openScreen('Claude bulk triage', renderClaudeScreen)],
     ['☁️', 'Sync', 'Status: ' + SYNC.status, () => openScreen('Sync', renderSyncScreen)],
     ['💾', 'Backup', 'Export / import everything', () => openScreen('Backup', renderBackupScreen)],
@@ -2267,6 +2282,44 @@ function renderAccountsScreen(c){
       };
     };
   });
+}
+
+/* ---- Data health screen (statement-coverage audit) ---- */
+function renderHealthScreen(c){
+  const txns = liveTxns();
+  if (!txns.length){ c.innerHTML = '<div class="empty">Nothing imported yet.</div>'; return; }
+  const accts = Object.values(DATA.accounts).filter((a) => !a.deleted);
+  const rv = reviewTxns().length;
+  let html = '<p class="muted" style="margin:0 0 10px">Every account, every month between its first and last transaction. ' +
+    '<b>A month with zero transactions almost always means a missing statement</b> — gaps silently skew averages, the baseline and the yearly forecast.</p>' +
+    (rv ? '<p class="tiny" style="margin:0 0 10px">Also: ' + rv + ' transactions still in review — they count as Uncategorized spend until sorted.</p>' : '');
+  for (const a of accts){
+    const mine = txns.filter((t) => t.acct === a.id);
+    if (!mine.length) continue;
+    const byYM = {};
+    let minD = null, maxD = null;
+    for (const t of mine){
+      const ym = ymOf(t.date);
+      (byYM[ym] = byYM[ym] || { n: 0, out: 0 }).n++;
+      if (t.amt < 0) byYM[ym].out += -t.amt;
+      if (!minD || t.date < minD) minD = t.date;
+      if (!maxD || t.date > maxD) maxD = t.date;
+    }
+    const span = ymRange(ymOf(minD), ymOf(maxD));
+    const gaps = span.filter((ym) => !byYM[ym]);
+    html += '<div class="card"><h3>' + esc(a.name) + '</h3>' +
+      '<p class="tiny" style="margin:0 0 8px">' + minD + ' → ' + maxD + ' · ' + mine.length + ' transactions · ' +
+      (gaps.length ? '<b style="color:var(--status-crit)">' + gaps.length + ' gap month' + (gaps.length > 1 ? 's' : '') + ' ⚠️</b>' : 'no gaps ✓') + '</p>' +
+      '<div class="tbl-wrap"><table class="map-tbl"><tr><th>Month</th><th style="text-align:right">Txns</th><th style="text-align:right">Money out</th></tr>' +
+      span.map((ym) => {
+        const b = byYM[ym];
+        return b
+          ? '<tr><td>' + fmtMonth(ym) + '</td><td style="text-align:right">' + b.n + '</td><td style="text-align:right">' + fmt$(b.out) + '</td></tr>'
+          : '<tr><td style="color:var(--status-crit)">' + fmtMonth(ym) + '</td><td colspan="2" style="color:var(--status-crit)">⚠️ nothing — missing statement?</td></tr>';
+      }).join('') + '</table></div></div>';
+  }
+  html += '<p class="tiny">Fix a gap by downloading that date range from the bank and importing it — overlapping rows are deduped automatically, so grabbing extra is always safe.</p>';
+  c.innerHTML = html;
 }
 
 /* ---- Claude triage screen ---- */
