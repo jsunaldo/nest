@@ -2195,8 +2195,23 @@ loadData();
 bindNav();
 showTab('home');
 setSync('local');
-if ('serviceWorker' in navigator)
+if ('serviceWorker' in navigator){
+  // Auto-refresh once when a new app version takes over, so shipped updates
+  // actually land on installed PWAs without a manual force-close.
+  const hadController = !!navigator.serviceWorker.controller;
+  let refreshed = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || refreshed) return;
+    refreshed = true;
+    saveNow();
+    window.location.reload();
+  });
   window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch(() => {}); });
+  // Resident PWAs never re-navigate on foreground; check for a new sw.js there too.
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) navigator.serviceWorker.getRegistration().then((r) => { if (r) r.update(); });
+  });
+}
 {
   const pass = localStorage.getItem('nest.pass');
   if (pass) deriveKeys(pass).then((k) => {
