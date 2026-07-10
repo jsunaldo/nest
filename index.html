@@ -671,6 +671,23 @@ function baselineByCat(agg){
   }
   return out;
 }
+// Suggested budgets from recent actuals: average monthly spend per category
+// over the last (up to) 6 FULL months with any data — the current partial
+// month is excluded — rounded UP to the nearest $10. Average (not median) on
+// purpose: lumpy-but-real costs like lawn care should suggest their run-rate.
+function suggestBudgets(agg){
+  agg = agg || buildMonthAgg();
+  const cur = currentYM();
+  const months = Object.keys(agg).filter((ym) => ym < cur).sort().slice(-6);
+  const out = { months: months.length, cats: {} };
+  if (!months.length) return out;
+  for (const c of liveCats()){
+    if ((c.kind || 'expense') !== 'expense') continue;
+    const total = months.reduce((sum, ym) => sum + (agg[ym].spend[c.id] || 0), 0);
+    if (total > 0) out.cats[c.id] = Math.ceil(total / months.length / 1000) * 1000;
+  }
+  return out;
+}
 // Explicit budget wins; else baseline; else null.
 function budgetFor(catId, baseline){
   const b = DATA.budgets[catId];
@@ -1841,13 +1858,16 @@ function renderBudgetsScreen(c){
   const agg = buildMonthAgg();
   const s = settings();
   const baseline = baselineByCat(agg);
+  const sugg = suggestBudgets(agg);
   let html = '<div class="card"><h3>Baseline window — your “natural” months</h3>' +
     '<div class="row"><label class="fld grow"><span>From</span><input type="month" data-x="bfrom" value="' + esc(s.baselineFrom || '') + '"></label>' +
     '<label class="fld grow"><span>To</span><input type="month" data-x="bto" value="' + esc(s.baselineTo || '') + '"></label></div>' +
     '<p class="muted" style="margin:0">Pick pre-move months that reflect normal life. Natural budget = your typical month across that window (House Setup excluded).' +
     (baseline ? ' <b style="color:var(--text)">Baseline: ' + fmt$(baseline.total) + '/mo across ' + baseline.months + ' month' + (baseline.months > 1 ? 's' : '') + ' of data.</b>' : '') +
     '</p></div>';
-  html += '<div class="card"><h3>Monthly budgets</h3><p class="tiny" style="margin:0 0 8px">Blank = use baseline automatically. Enter dollars to override.</p>';
+  html += '<div class="card"><h3>Monthly budgets</h3><p class="tiny" style="margin:0 0 8px">Blank = use baseline automatically. ' +
+    (sugg.months ? '“avg” = what you actually spent (last ' + sugg.months + ' full month' + (sugg.months > 1 ? 's' : '') + ') — tap one to use it.' : 'Suggestions appear once a full month of data exists.') + '</p>' +
+    (sugg.months ? '<button class="btn btn-sm btn-block" data-x="fillall" style="margin-bottom:8px">💡 Fill empty budgets from actuals</button>' : '');
   let total = 0;
   for (const g of GROUPS){
     if (g.kind === 'income' || g.kind === 'system') continue;
@@ -1860,8 +1880,10 @@ function renderBudgetsScreen(c){
       const bf = budgetFor(cat.id, baseline);
       if (bf) total += bf.amt;
       const baseTxt = baseline && baseline.cats[cat.id] ? fmt$(baseline.cats[cat.id]) : '—';
+      const sugTxt = sugg.cats[cat.id]
+        ? ' · <a data-sug="' + esc(cat.id) + '" style="cursor:pointer">avg ' + fmt$(sugg.cats[cat.id]) + ' — use</a>' : '';
       html += '<div class="list-item" style="cursor:default"><span class="ic">' + esc(cat.icon || '•') + '</span>' +
-        '<div class="body"><div class="t1">' + esc(cat.name) + '</div><div class="t2">baseline ' + baseTxt + '</div></div>' +
+        '<div class="body"><div class="t1">' + esc(cat.name) + '</div><div class="t2">baseline ' + baseTxt + sugTxt + '</div></div>' +
         '<input class="budget-in" type="number" min="0" step="1" inputmode="decimal" data-bcat="' + esc(cat.id) + '"' +
         ' value="' + (explicit != null ? (explicit / 100) : '') + '"' +
         ' placeholder="' + (baseline && baseline.cats[cat.id] ? Math.round(baseline.cats[cat.id] / 100) : '·') + '"></div>';
@@ -1889,6 +1911,27 @@ function renderBudgetsScreen(c){
       renderBudgetsScreen(c);
     };
   });
+  c.querySelectorAll('[data-sug]').forEach((a2) => {
+    a2.onclick = () => {
+      put('budgets', { id: a2.dataset.sug, amt: sugg.cats[a2.dataset.sug] });
+      renderBudgetsScreen(c); toast('Budget set from your actuals');
+    };
+  });
+  const fa = c.querySelector('[data-x=fillall]');
+  if (fa) fa.onclick = () => {
+    let filled = 0;
+    for (const catId in sugg.cats){
+      const cat = DATA.cats[catId];
+      const g = GROUPS.find((x) => x.id === (cat && cat.group));
+      if (g && g.excludeFromBaseline) continue; // one-time groups don't get standing budgets
+      const b = DATA.budgets[catId];
+      if (b && !b.deleted && b.amt > 0) continue; // never overwrite an explicit budget
+      put('budgets', { id: catId, amt: sugg.cats[catId] });
+      filled++;
+    }
+    toast(filled + ' budget' + (filled === 1 ? '' : 's') + ' filled from your actuals');
+    renderBudgetsScreen(c);
+  };
 }
 
 /* ---- Recurring screen ---- */
