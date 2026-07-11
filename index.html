@@ -298,7 +298,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v7.4'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v7.5'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1538,12 +1538,16 @@ function accountBalanceSeries(acct, year){
     if (openBal != null && pts[0].bal !== openBal) pts.unshift({ ym: prevYM, bal: openBal });
   }
   if (year && year !== 'all'){
-    // Clamp to the year's activity range: first activity month (or the account's
-    // opening if it opened that year) → last activity month. No leading carry-in.
+    // A balance is cumulative, so a year opens at the balance it carried IN (the prior
+    // year's close), not at its first in-year transaction — otherwise each year starts
+    // mid-air and doesn't line up with the previous year's end. Include the month before
+    // the year's first activity as that carry-in point (the first year carries in its
+    // opening balance — $0 for an account that opened empty).
     let lo = null, hi = null;
     for (const k in monthly){ if (k.slice(0, 4) !== year) continue; if (!lo || k < lo) lo = k; if (!hi || k > hi) hi = k; }
     if (anchored){ const aym = acct.anchorDate.slice(0, 7); if (aym.slice(0, 4) === year && (!lo || aym < lo)) lo = aym; }
-    pts = lo ? pts.filter((p) => p.ym >= lo && p.ym <= (hi && hi >= lo ? hi : lo)) : pts.filter((p) => p.ym.slice(0, 4) === year);
+    if (lo){ const carry = shiftYM(lo, -1); pts = pts.filter((p) => p.ym >= carry && p.ym <= (hi && hi >= lo ? hi : lo)); }
+    else pts = pts.filter((p) => p.ym.slice(0, 4) === year);
   }
   return { pts, anchored };
 }
@@ -1593,12 +1597,15 @@ function combinedBalanceSeries(year){
     if (pts[0].bal !== openBal) pts.unshift({ ym: prevYM, bal: openBal });
   }
   if (year && year !== 'all'){
-    // Clamp to the year's activity range: first activity month (or an account opening
-    // that year) → last activity month, so it aligns with the spending charts.
+    // Net worth is cumulative, so a year opens at the balance it carried IN (the prior
+    // year's close), not at its first in-year activity — otherwise each year starts
+    // mid-air and 2026 wouldn't line up with the end of 2025. Include the month before
+    // the year's first activity as that carry-in (the first year carries in $0).
     let lo = null, hi = null;
     for (const t of liveTxns()){ if (!t.date || t.date.slice(0, 4) !== year) continue; const ym = t.date.slice(0, 7); if (!lo || ym < lo) lo = ym; if (!hi || ym > hi) hi = ym; }
     for (const a of anchoredAccts){ const aym = a.anchorDate.slice(0, 7); if (aym.slice(0, 4) === year && (!lo || aym < lo)) lo = aym; }
-    pts = lo ? pts.filter((p) => p.ym >= lo && p.ym <= (hi && hi >= lo ? hi : lo)) : pts.filter((p) => p.ym.slice(0, 4) === year);
+    if (lo){ const carry = shiftYM(lo, -1); pts = pts.filter((p) => p.ym >= carry && p.ym <= (hi && hi >= lo ? hi : lo)); }
+    else pts = pts.filter((p) => p.ym.slice(0, 4) === year);
   }
   return { pts, anchored: valued };
 }
