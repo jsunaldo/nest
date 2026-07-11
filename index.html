@@ -292,7 +292,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v7.0'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v7.1'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -2421,7 +2421,8 @@ function renderGiftList(c, close){
     '<button class="btn btn-primary grow" data-x="add">＋ Add gift</button></div>';
   html += items.length
     ? '<div class="card" style="padding:2px 12px">' + items.map(giftRowHTML).join('') + '</div>' +
-      '<p class="tiny" style="margin:8px 0 16px">Tap ⭕ to mark a thank-you sent · tap a row to edit.</p>'
+      '<p class="tiny" style="margin:8px 0 16px">Tap ⭕ to mark a thank-you sent · tap a row to edit · ' +
+      '<a data-x="clearall" style="color:var(--status-crit);cursor:pointer">Clear all</a></p>'
     : '<div class="empty" style="margin-bottom:16px">No gifts yet — paste your list from Excel, or add them one at a time.</div>';
   c.innerHTML = html;
   const q = (s) => c.querySelector(s);
@@ -2429,6 +2430,9 @@ function renderGiftList(c, close){
   q('[data-x=close]').onclick = () => close && close();
   q('[data-x=add]').onclick = () => openGiftEditor(null, rerender);
   q('[data-x=import]').onclick = () => openGiftImport(rerender);
+  { const ca = q('[data-x=clearall]'); if (ca) ca.onclick = async () => {
+    if (await confirmDlg('Delete all ' + giftItems().length + ' gifts from the registry? This can’t be undone.', 'Clear all')){ saveGiftItems([]); rerender(); }
+  }; }
   c.querySelectorAll('[data-thx]').forEach((n) => { n.onclick = (e) => {
     e.stopPropagation();
     const items2 = giftItems().slice(); const g = items2.find((x) => x.id === n.dataset.thx);
