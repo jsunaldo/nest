@@ -259,7 +259,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v5.6'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v5.7'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1489,6 +1489,40 @@ function accountBalanceSeries(acct, year){
   if (year && year !== 'all') pts = pts.filter((p) => p.ym.slice(0, 4) === year);
   return { pts, anchored };
 }
+// Net worth over time across ALL accounts: for each month, sum of every anchored
+// cash/credit account's balance + every Bitcoin account's $ value (via its price
+// curve). If nothing is anchored/valued, falls back to cumulative net flow from 0
+// (shape only). `anchored` = the total is real money, not a from-zero shape.
+function combinedBalanceSeries(year){
+  const accts = liveAccounts();
+  const anchoredAccts = accts.filter((a) => a.type !== 'btc' && a.anchorBal != null && a.anchorDate);
+  const btcAccts = accts.filter((a) => a.type === 'btc');
+  const valued = anchoredAccts.length > 0 || btcAccts.length > 0;
+  let minYM = null;
+  for (const t of liveTxns()){ if (!t.date) continue; const ym = t.date.slice(0, 7); if (!minYM || ym < minYM) minYM = ym; }
+  for (const a of anchoredAccts){ const ym = a.anchorDate.slice(0, 7); if (!minYM || ym < minYM) minYM = ym; }
+  if (!minYM) return { pts: [], anchored: valued };
+  let maxYM = currentYM();
+  const months = []; for (let y = minYM; y <= maxYM; y = shiftYM(y, 1)){ months.push(y); if (months.length > 600) break; }
+  let pts;
+  if (valued){
+    const btcMaps = {};
+    for (const a of btcAccts){ const m = {}; for (const p of btcSeries(a.id, 'all').pts) m[p.ym] = p.value; btcMaps[a.id] = m; }
+    pts = months.map((ym) => {
+      const eom = ym + '-31'; let total = 0;
+      for (const a of anchoredAccts) total += (accountBalanceAt(a, eom) || 0);
+      for (const a of btcAccts){ const v = btcMaps[a.id][ym]; if (v != null) total += v; }
+      return { ym, bal: total };
+    });
+  } else {
+    const monthly = {};
+    for (const t of liveTxns()){ if (!t.date) continue; const ym = t.date.slice(0, 7); monthly[ym] = (monthly[ym] || 0) + t.amt; }
+    let run = 0;
+    pts = months.map((ym) => { run += (monthly[ym] || 0); return { ym, bal: run }; });
+  }
+  if (year && year !== 'all') pts = pts.filter((p) => p.ym.slice(0, 4) === year);
+  return { pts, anchored: valued };
+}
 const ACCT_TYPES = [['checking', 'Checking'], ['savings', 'Savings'], ['investment', 'Investment'], ['btc', 'Bitcoin Investment'], ['credit', 'Credit card']];
 // --- Bitcoin: satoshis on txns (t.btc), live spot price cached ~5 min. ---
 let BTC_PRICE = null; // { usd: cents, at: ms }
@@ -2100,6 +2134,29 @@ function renderHome(){
         }).join('') +
         (!anyBal ? '<p class="tiny" style="margin:8px 0 0">Tap an account to enter its current balance — Nest keeps it updated from your transactions.</p>' : '') +
         '</div>';
+    }
+  }
+
+  // Balance over time — net worth across ALL accounts (the overall picture).
+  {
+    const bser = combinedBalanceSeries(YEAR_LENS), bpts = bser.pts;
+    const bchart = balanceChartHTML(bpts);
+    if (bchart){
+      const vals = bpts.map((p) => p.bal), nn = vals.length;
+      const mx = (nn - 1) / 2, my = vals.reduce((x, y) => x + y, 0) / nn;
+      let num = 0, den = 0;
+      for (let i = 0; i < nn; i++){ num += (i - mx) * (vals[i] - my); den += (i - mx) * (i - mx); }
+      const perMo = den ? Math.round(num / den) : 0;
+      const startBal = bpts[0].bal, curBal = bpts[nn - 1].bal, delta = curBal - startBal;
+      html += '<div class="card"><h3>' + (bser.anchored ? 'Balance over time' : 'Net flow over time') + '</h3>' +
+        (bser.anchored ? '<div class="bl-row" style="margin-bottom:10px">' +
+          '<div class="bl-tile"><div class="bl-v">' + fmt$(startBal) + '</div><div class="bl-l">Start</div></div>' +
+          '<div class="bl-tile"><div class="bl-v"' + (curBal < 0 ? ' style="color:var(--status-crit)"' : '') + '>' + fmt$(curBal) + '</div><div class="bl-l">Now</div></div>' +
+          '<div class="bl-tile"><div class="bl-v" style="color:' + (delta >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(delta, { signed: true }) + '</div><div class="bl-l">Change</div></div></div>' : '') +
+        bchart +
+        '<div class="legend"><span><i style="background:var(--viz-2)"></i>' + (bser.anchored ? 'Net worth (all accounts)' : 'Cumulative flow') + '</span><span><i style="background:var(--accent)"></i>Trend</span></div>' +
+        '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Trending ' + (perMo >= 0 ? '▲' : '▼') + ' ' + fmt$(Math.abs(perMo)) + '/mo' +
+        (bser.anchored ? '' : ' · set account balances for real dollar amounts') + '</span></div></div>';
     }
   }
 
