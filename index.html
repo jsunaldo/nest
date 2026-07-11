@@ -246,6 +246,12 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 .gift-row .gift-thx{cursor:pointer; font-size:18px; opacity:.85}
 .gift-row .gift-thx.on{opacity:1}
 .gift-row .amt{color:var(--status-good)}
+.gift-row.gift-person{border-bottom:none}
+.gift-row.gift-person .body .t1{font-weight:700}
+/* a single gift under a person who gave more than once */
+.gift-sub{margin-left:24px; border-left:2px solid var(--line); padding-left:14px}
+.gift-sub .body .t2{color:var(--text); font-size:13px}
+.gift-sub .amt{color:var(--status-good)}
 .tree-act{color:var(--accent); font-size:17px; padding:2px 6px; flex-shrink:0; cursor:pointer}
 .tree-l1{margin-left:6px; border-left:2px solid var(--line); padding-left:12px}
 .tree-l2{margin-left:14px; border-left:2px solid var(--line); padding-left:16px}
@@ -292,7 +298,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v7.1'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v7.2'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -2399,29 +2405,61 @@ function openGiftList(){
   const m = modal('', '<div data-x="gbody"></div>', () => renderCurrent());
   renderGiftList(m.node.querySelector('[data-x=gbody]'), m.close);
 }
-function giftRowHTML(g){
-  return '<div class="list-item gift-row" data-giftedit="' + esc(g.id) + '" style="cursor:pointer">' +
-    '<span class="ic gift-thx' + (g.thanked ? ' on' : '') + '" data-thx="' + esc(g.id) + '" title="' + (g.thanked ? 'Thanked' : 'Mark thanked') + '">' + (g.thanked ? '✅' : '⭕') + '</span>' +
-    '<div class="body"><div class="t1">' + esc(g.name || '—') + '</div>' + (g.note ? '<div class="t2">' + esc(g.note) + '</div>' : '') + '</div>' +
-    '<span class="amt">' + (g.amt != null ? fmt$(g.amt) : '') + '</span></div>';
+// Group gifts by giver (case/space-insensitive) so someone who gave more than
+// once — e.g. cash AND a physical gift — shows as ONE person with all their gifts.
+const giftKey = (name) => (name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+function groupGifts(items){
+  const map = new Map();
+  for (const g of items){
+    const k = giftKey(g.name);
+    if (!map.has(k)) map.set(k, { name: g.name, gifts: [] });
+    map.get(k).gifts.push(g);
+  }
+  const groups = [...map.values()].map((grp) => ({
+    name: grp.name, gifts: grp.gifts,
+    total: grp.gifts.reduce((s, g) => s + (g.amt || 0), 0),
+    allThanked: grp.gifts.every((g) => g.thanked)
+  }));
+  groups.sort((a, b) => b.total - a.total || (a.name || '').localeCompare(b.name || ''));
+  return groups;
+}
+function giftGroupHTML(grp){
+  if (grp.gifts.length === 1){
+    const g = grp.gifts[0];
+    return '<div class="list-item gift-row" data-giftedit="' + esc(g.id) + '" style="cursor:pointer">' +
+      '<span class="ic gift-thx' + (g.thanked ? ' on' : '') + '" data-thx="' + esc(g.id) + '" title="' + (g.thanked ? 'Thanked' : 'Mark thanked') + '">' + (g.thanked ? '✅' : '⭕') + '</span>' +
+      '<div class="body"><div class="t1">' + esc(g.name || '—') + '</div>' + (g.note ? '<div class="t2">' + esc(g.note) + '</div>' : '') + '</div>' +
+      '<span class="amt">' + (g.amt != null ? fmt$(g.amt) : '') + '</span></div>';
+  }
+  const ids = grp.gifts.map((g) => g.id).join(',');
+  let h = '<div class="list-item gift-row gift-person">' +
+    '<span class="ic gift-thx' + (grp.allThanked ? ' on' : '') + '" data-thxmany="' + esc(ids) + '" title="Mark all thanked">' + (grp.allThanked ? '✅' : '⭕') + '</span>' +
+    '<div class="body"><div class="t1">' + esc(grp.name || '—') + ' <span style="color:var(--dim);font-weight:400;font-size:12px">· ' + grp.gifts.length + ' gifts</span></div></div>' +
+    '<span class="amt">' + (grp.total ? fmt$(grp.total) : '') + '</span></div>';
+  for (const g of grp.gifts)
+    h += '<div class="list-item gift-sub" data-giftedit="' + esc(g.id) + '" style="cursor:pointer">' +
+      '<div class="body"><div class="t2">' + (g.note ? esc(g.note) : (g.amt != null ? 'Cash gift' : 'Gift')) + '</div></div>' +
+      '<span class="amt">' + (g.amt != null ? fmt$(g.amt) : '') + '</span></div>';
+  return h;
 }
 function renderGiftList(c, close){
-  const items = giftItems().slice().sort((a, b) => (b.amt || 0) - (a.amt || 0) || (a.name || '').localeCompare(b.name || ''));
+  const items = giftItems().slice();
+  const groups = groupGifts(items);
   const total = items.reduce((s, g) => s + (g.amt || 0), 0);
-  const thanked = items.filter((g) => g.thanked).length;
+  const thankedPeople = groups.filter((gp) => gp.allThanked).length;
   let html = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">' +
     '<b style="font-size:17px">🎁 Wedding Gift Registry</b>' +
     '<button class="btn btn-sm" data-x="close">✕ Close</button></div>';
   html += '<div class="bl-row">' +
-    '<div class="bl-tile"><div class="bl-v">' + items.length + '</div><div class="bl-l">Gifts</div></div>' +
+    '<div class="bl-tile"><div class="bl-v">' + groups.length + '</div><div class="bl-l">People</div></div>' +
     '<div class="bl-tile"><div class="bl-v" style="color:var(--status-good)">' + fmt$(total) + '</div><div class="bl-l">Total received</div></div>' +
-    '<div class="bl-tile"><div class="bl-v">' + thanked + '<span style="color:var(--dim)">/' + items.length + '</span></div><div class="bl-l">Thanked</div></div></div>';
+    '<div class="bl-tile"><div class="bl-v">' + thankedPeople + '<span style="color:var(--dim)">/' + groups.length + '</span></div><div class="bl-l">Thanked</div></div></div>';
   html += '<div class="row" style="margin:2px 0 12px">' +
     '<button class="btn grow" data-x="import">📋 Paste from Excel</button>' +
     '<button class="btn btn-primary grow" data-x="add">＋ Add gift</button></div>';
-  html += items.length
-    ? '<div class="card" style="padding:2px 12px">' + items.map(giftRowHTML).join('') + '</div>' +
-      '<p class="tiny" style="margin:8px 0 16px">Tap ⭕ to mark a thank-you sent · tap a row to edit · ' +
+  html += groups.length
+    ? '<div class="card" style="padding:2px 12px">' + groups.map(giftGroupHTML).join('') + '</div>' +
+      '<p class="tiny" style="margin:8px 0 16px">' + items.length + ' gifts from ' + groups.length + ' people · tap ⭕ to mark thanked · tap a gift to edit · ' +
       '<a data-x="clearall" style="color:var(--status-crit);cursor:pointer">Clear all</a></p>'
     : '<div class="empty" style="margin-bottom:16px">No gifts yet — paste your list from Excel, or add them one at a time.</div>';
   c.innerHTML = html;
@@ -2437,6 +2475,13 @@ function renderGiftList(c, close){
     e.stopPropagation();
     const items2 = giftItems().slice(); const g = items2.find((x) => x.id === n.dataset.thx);
     if (g){ g.thanked = !g.thanked; saveGiftItems(items2); rerender(); }
+  }; });
+  c.querySelectorAll('[data-thxmany]').forEach((n) => { n.onclick = (e) => {
+    e.stopPropagation();
+    const ids = n.dataset.thxmany.split(','), items2 = giftItems().slice();
+    const target = !ids.every((id) => { const g = items2.find((x) => x.id === id); return g && g.thanked; });
+    for (const id of ids){ const g = items2.find((x) => x.id === id); if (g) g.thanked = target; }
+    saveGiftItems(items2); rerender();
   }; });
   c.querySelectorAll('[data-giftedit]').forEach((n) => { n.onclick = () => openGiftEditor(n.dataset.giftedit, rerender); });
 }
