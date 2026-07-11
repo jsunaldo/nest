@@ -279,7 +279,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v6.6'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v6.7'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1714,7 +1714,7 @@ function openCatTreePicker(opts){
       return '<div class="tree-row ' + lvl + '" data-pick="' + esc(pickVal) + '" style="cursor:pointer"><span class="ic">' + icon + '</span>' +
         '<div class="body"><div class="t1">' + esc(name) + '</div></div>' +
         (on ? '<span class="chev" style="color:var(--accent)">✓</span>' : '') +
-        '<span class="chev" data-tog="' + esc(togKey) + '">' + (sOpen ? '▾' : '▸') + '</span></div>';
+        '<span class="chev tog" data-tog="' + esc(togKey) + '">' + (sOpen ? '▾' : '▸') + '</span></div>';
     };
     const leaf = (cat, lvl) => { const on = opts.current === cat.id; return '<div class="tree-row ' + lvl + '" data-pick="' + esc(cat.id) + '"><span class="ic">' + esc(cat.icon || '•') + '</span><div class="body"><div class="t1">' + esc(cat.name) + '</div></div><span class="chev">' + (on ? '✓' : '') + '</span></div>'; };
     function draw(){
@@ -3467,7 +3467,7 @@ function renderRecurringScreen(c){
     '<div class="tree-row ' + lvl + '"' + (tog ? ' data-rtog="' + esc(tog) + '" style="cursor:pointer"' : catId ? ' data-catedit="' + esc(catId) + '" style="cursor:pointer"' : ' style="cursor:default"') + '>' +
     '<span class="ic">' + icon + '</span><div class="body"><div class="t1">' + esc(name) + '</div>' +
     (sub ? '<div class="t2">' + esc(sub) + '</div>' : '') + '</div>' +
-    '<span class="amt">' + amtStr + '</span>' + (tog ? '<span class="chev">' + (open ? '▾' : '▸') + '</span>' : '<span class="chev" style="opacity:.5">' + (catId ? '✎' : '') + '</span>') + '</div>';
+    '<span class="amt">' + amtStr + '</span>' + (tog ? '<span class="chev tog">' + (open ? '▾' : '▸') + '</span>' : '<span class="chev" style="opacity:.5">' + (catId ? '✎' : '') + '</span>') + '</div>';
 
   // Each category is a leaf, tappable to edit (rename / seasonal / one-time).
   const catNode = (cid, lvl) => { const cl = catLabel(cid);
@@ -3491,7 +3491,7 @@ function renderRecurringScreen(c){
     '<div class="tree-row grp" data-rtog="mbm" style="cursor:pointer"><span class="ic">📅</span>' +
     '<div class="body"><div class="t1">Annualized average recurring</div>' +
     '<div class="t2">every ongoing category, averaged per month · tap for month-by-month</div></div>' +
-    '<span class="amt">' + fmt$(grandTotal) + '/mo</span><span class="chev">' + (mbmOpen ? '▾' : '▸') + '</span></div>';
+    '<span class="amt">' + fmt$(grandTotal) + '/mo</span><span class="chev tog">' + (mbmOpen ? '▾' : '▸') + '</span></div>';
   if (mbmOpen){
     html += '<div style="padding:6px 12px 12px">';
     for (let cm = 1; cm <= 12; cm++){
@@ -3514,7 +3514,7 @@ function renderRecurringScreen(c){
     const gTotal = gcats.reduce((s, cid) => s + catTotal(cid), 0);
     const gkey = 'g:' + g.id, gOpen = RECUR_OPEN.has(gkey);
     html += '<div class="tree-row grp" data-rtog="' + esc(gkey) + '" style="cursor:pointer"><span class="ic">' + (g.icon || '📂') + '</span>' +
-      '<div class="body"><div class="t1">' + esc(g.name) + '</div></div><span class="amt">' + fmt$(gTotal) + '/mo</span><span class="chev">' + (gOpen ? '▾' : '▸') + '</span></div>';
+      '<div class="body"><div class="t1">' + esc(g.name) + '</div></div><span class="amt">' + fmt$(gTotal) + '/mo</span><span class="chev tog">' + (gOpen ? '▾' : '▸') + '</span></div>';
     if (!gOpen) continue;
     const direct = gcats.filter((cid) => !DATA.cats[cid].sub);
     const bySub = {};
@@ -3729,7 +3729,7 @@ function renderCatsScreen(c){
     html += '<div class="tree-row grp" data-gtog="' + g.id + '"><span class="ic">' + (g.icon || '📂') + '</span>' +
       '<div class="body"><div class="t1">' + esc(g.name) + '</div></div>' +
       (g.kind === 'system' ? '' : '<span class="tree-act" data-gadd="' + g.id + '">＋</span>') +
-      '<span class="chev">' + (gOpen ? '▾' : '▸') + '</span></div>';
+      '<span class="chev tog">' + (gOpen ? '▾' : '▸') + '</span></div>';
     if (!gOpen) continue;
     const bySub = {}, direct = [];
     for (const cat of cats){ if (cat.sub){ (bySub[cat.sub] = bySub[cat.sub] || []).push(cat); } else direct.push(cat); }
@@ -3740,7 +3740,7 @@ function renderCatsScreen(c){
         '<div class="body"><div class="t1">' + esc(s) + '</div><div class="t2">' + bySub[s].length + ' categor' + (bySub[s].length === 1 ? 'y' : 'ies') + '</div></div>' +
         '<span class="tree-act" data-sedit="' + esc(g.id + '|' + s) + '">✎</span>' +
         '<span class="tree-act" data-sadd="' + esc(g.id + '|' + s) + '">＋</span>' +
-        '<span class="chev">' + (sOpen ? '▾' : '▸') + '</span></div>';
+        '<span class="chev tog">' + (sOpen ? '▾' : '▸') + '</span></div>';
       if (sOpen) for (const cat of bySub[s]) html += catTreeRow(cat, 'tree-l2');
     }
   }
