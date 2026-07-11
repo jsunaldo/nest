@@ -188,17 +188,23 @@ table.map-tbl th{color:var(--dim); font-weight:600}
 .filter-selects{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px}
 .filter-selects select{flex:1 1 30%; min-width:104px; padding:8px 10px; font-size:13px; width:auto}
 .filter-selects select.act{border-color:var(--accent)}
-.filt-btn{flex:1 1 30%; min-width:104px; padding:8px 10px; font-size:13px; text-align:left;
+.filt-btn{flex:1 1 100%; min-width:104px; padding:8px 10px; font-size:13px; text-align:left;
   background:var(--bg); border:1px solid var(--line); border-radius:10px; color:var(--text); cursor:pointer;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  display:flex; align-items:center; gap:6px}
+/* label truncates but the ▾ caret lives in its own span so it is never clipped */
+.filt-btn .fb-lbl{overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0}
+.filt-btn .fb-car{margin-left:auto; flex:0 0 auto; color:var(--dim)}
 .filt-btn.act{border-color:var(--accent)}
 .tag-x{font-size:11px; opacity:.7; margin-left:2px}
 input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 .rule-pat{font-family:ui-monospace,Menlo,monospace; font-size:12px; background:var(--bg);
   border:1px solid var(--line); border-radius:6px; padding:2px 6px; overflow-wrap:anywhere}
-.bl-row{display:flex; gap:8px; margin-bottom:10px}
-.bl-tile{flex:1; text-align:center; background:var(--card2); border:1px solid var(--line); border-radius:12px; padding:11px 4px}
-.bl-tile .bl-v{font-size:19px; font-weight:800; font-variant-numeric:tabular-nums; white-space:nowrap}
+.bl-row{display:flex; gap:6px; margin-bottom:10px}
+.bl-tile{flex:1 1 0; min-width:0; text-align:center; background:var(--card2); border:1px solid var(--line); border-radius:12px; padding:11px 2px}
+/* value font scales with width so three tiles (e.g. −$4,224.73) fit in full on a phone */
+.bl-tile .bl-v{font-size:clamp(12px, 3.5vw, 19px); font-weight:800; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+/* the BTC-holdings tile carries a longer string ("0.04166667 ₿") so it needs a smaller floor to fit three-up on a phone */
+.bl-tile .bl-v-btc{font-size:clamp(11px, 2.9vw, 17px)}
 .bl-tile .bl-l{font-size:11px; color:var(--dim); margin-top:3px}
 .bl-proj{display:flex; align-items:center; gap:10px; border-radius:12px; padding:10px 14px; border:1px solid var(--line)}
 .bl-proj.good{background:rgba(12,163,12,.10); border-color:rgba(12,163,12,.32)}
@@ -259,7 +265,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v6.2'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v6.3'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -2429,7 +2435,7 @@ function renderAccountModal(c, acctId, close){
     const valLbl = scoped ? 'Value' : 'Current value', priceLbl = scoped ? 'Price' : 'BTC price';
     // Headline: holdings, value, gain/loss.
     html += '<div class="card"><div class="bl-row">' +
-      '<div class="bl-tile"><div class="bl-v" style="color:' + BTC_ORANGE + '">' + b.btc.toLocaleString('en-US', { maximumFractionDigits: 8 }) + ' ₿</div><div class="bl-l">Bitcoin</div></div>' +
+      '<div class="bl-tile"><div class="bl-v bl-v-btc" style="color:' + BTC_ORANGE + '">' + b.btc.toLocaleString('en-US', { maximumFractionDigits: 8 }) + ' ₿</div><div class="bl-l">Bitcoin</div></div>' +
       '<div class="bl-tile"><div class="bl-v">' + (b.value != null ? fmt$(b.value) : '—') + '</div><div class="bl-l">' + valLbl + '</div></div>' +
       '<div class="bl-tile"><div class="bl-v" style="color:' + gc2 + '">' + (gain != null ? fmt$(gain, { signed: true }) : '—') + '</div><div class="bl-l">Gain / loss</div></div></div>' +
       // Second row: invested, avg buy price, price.
@@ -2858,7 +2864,7 @@ function renderActivity(){
     '<div class="filter-selects">' +
       sel('fy', ACT.year, yearOpts, ACT.year ? 'act' : '') +
       sel('fmo', ACT.mo, moOpts, ACT.mo ? 'act' : '') +
-      '<button class="filt-btn' + (ACT.cat ? ' act' : '') + '" data-x="fcatbtn">' + esc(catLabelTxt) + ' ▾</button>' +
+      '<button class="filt-btn' + (ACT.cat ? ' act' : '') + '" data-x="fcatbtn"><span class="fb-lbl">' + esc(catLabelTxt) + '</span><span class="fb-car">▾</span></button>' +
       (accts.length > 1 ? sel('facc', ACT.acct, accOpts, ACT.acct ? 'act' : '') : '') +
       sel('fst', ACT.status, stOpts, ACT.status ? 'act' : '') +
     '</div>' +
