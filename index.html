@@ -284,7 +284,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v6.8'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v6.9'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1672,9 +1672,24 @@ function catBtnHTML(id){
   return '<button class="cat-btn" data-cat="' + esc(id) + '">' + esc(c.icon || '•') + ' ' + esc(c.name) + '</button>';
 }
 function txnIcon(t){ return (t.splits && t.splits.length) ? '🔀' : catLabel(t.cat).icon; }
+// Signed sum of a txn's parts that fall under a category filter value (a catId,
+// 'g:gid', 'sub:gid|name', or '__uncat'). No filter → the whole transaction.
+function txnPortion(t, filterVal){
+  if (!filterVal) return t.amt;
+  let s = 0;
+  for (const p of effParts(t)) if (catValueMatches(p.cat, filterVal)) s += p.amt;
+  return s;
+}
 function txnRowHTML(t, opts){
   opts = opts || {};
-  const cl = (t.splits && t.splits.length) ? { icon: '🔀', name: 'Split' } : catLabel(t.cat);
+  const isSplit = !!(t.splits && t.splits.length);
+  // With a category filter active, a split transaction shows only ITS portion in
+  // that category (amount + label), not the whole transaction.
+  const portioned = isSplit && opts.filterCat && txnPortion(t, opts.filterCat) !== t.amt;
+  const amt = portioned ? txnPortion(t, opts.filterCat) : t.amt;
+  const cl = isSplit
+    ? { icon: '🔀', name: portioned ? catFilterLabel(opts.filterCat) + ' · split portion' : 'Split' }
+    : catLabel(t.cat);
   const cls = 'list-item' + (t.status === 'excluded' ? ' li-excluded' : '');
   const check = opts.select
     ? '<span class="li-check' + (ACT.sel.has(t.id) ? ' on' : '') + '">' + (ACT.sel.has(t.id) ? '✓' : '') + '</span>'
@@ -1685,7 +1700,7 @@ function txnRowHTML(t, opts){
     (t.note ? '<div class="t2 txn-note">📝 ' + esc(t.note) + '</div>' : '') +
     '<div class="t2">' + fmtDate(t.date) + ' · ' + esc(accountName(t.acct)) + ' · ' + esc(cl.name) +
     (t.status === 'excluded' ? ' · excluded' : '') + '</div></div>' +
-    '<span class="amt ' + (t.amt > 0 ? 'amt-pos' : 'amt-neg') + '">' + fmt$(t.amt, { signed: t.amt > 0 }) + '</span></div>';
+    '<span class="amt ' + (amt > 0 ? 'amt-pos' : 'amt-neg') + '">' + fmt$(amt, { signed: amt > 0 }) + '</span></div>';
 }
 function copyText(s){
   if (navigator.clipboard && navigator.clipboard.writeText)
@@ -2448,7 +2463,7 @@ function renderCategoryModal(c, catId, close){
       const list = txnsInMonth(ym);
       const div = document.createElement('div');
       div.className = 'cmonth-detail';
-      div.innerHTML = list.length ? list.map((t) => txnRowHTML(t)).join('')
+      div.innerHTML = list.length ? list.map((t) => txnRowHTML(t, { filterCat: catId })).join('')
         : '<div class="list-item"><div class="body"><div class="t2">No transactions this month.</div></div></div>';
       row.after(div);
       if (chev) chev.textContent = '▾';
@@ -2945,8 +2960,10 @@ function renderActivity(){
   function drawList(){
     const txns = actFiltered();
     const shown = txns.slice(0, ACT.limit);
-    const outS = txns.reduce((s, x) => s + (x.status !== 'excluded' && x.amt < 0 ? -x.amt : 0), 0);
-    const inS = txns.reduce((s, x) => s + (x.status !== 'excluded' && x.amt > 0 ? x.amt : 0), 0);
+    // When filtered to a category, split transactions count only their portion.
+    const portionOf = (x) => ACT.cat ? txnPortion(x, ACT.cat) : x.amt;
+    const outS = txns.reduce((s, x) => { const a = portionOf(x); return s + (x.status !== 'excluded' && a < 0 ? -a : 0); }, 0);
+    const inS = txns.reduce((s, x) => { const a = portionOf(x); return s + (x.status !== 'excluded' && a > 0 ? a : 0); }, 0);
     let lh = shown.length
       ? '<div class="muted" style="margin:0 0 8px">' + txns.length + ' transaction' + (txns.length === 1 ? '' : 's') +
         ' · ' + fmt$(outS) + ' out · ' + fmt$(inS) + ' in</div>'
@@ -2956,10 +2973,10 @@ function renderActivity(){
       const ym = ymOf(t.date);
       if (ym !== lastYM){
         lastYM = ym;
-        const mSpend = txns.reduce((s, x) => s + (ymOf(x.date) === ym && x.status !== 'excluded' && x.amt < 0 ? -x.amt : 0), 0);
+        const mSpend = txns.reduce((s, x) => { const a = portionOf(x); return s + (ymOf(x.date) === ym && x.status !== 'excluded' && a < 0 ? -a : 0); }, 0);
         lh += '<div class="group-label row"><span class="grow">' + fmtMonth(ym) + '</span><span>' + fmt$(mSpend) + ' out</span></div>';
       }
-      lh += txnRowHTML(t, { select: ACT.select });
+      lh += txnRowHTML(t, { select: ACT.select, filterCat: ACT.cat });
     }
     if (!shown.length) lh = '<div class="empty">No matching transactions.</div>';
     if (txns.length > shown.length)
