@@ -259,7 +259,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v5.4'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v5.5'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -800,14 +800,26 @@ function effParts(t){
 // Events/Wedding) do not; everything else — paychecks, mortgage, groceries,
 // even gifts you GIVE — does, because it realistically recurs.
 const ONE_TIME_INCOME = new Set(['inc-other', 'inc-seed', 'inc-seed-s', 'inc-gift', 'inc-wedgift']);
+// Effective one-time state for a category. Gift/seed income and the Big Events group
+// DEFAULT to one-time, but an explicit user choice (cat.oneTime === true/false) always
+// wins — so the checkbox in the editor genuinely controls it, defaults included.
+function catIsOneTime(c){
+  if (!c) return false;
+  // A user's explicit editor choice (oneTimeUser) wins over every default. It's a
+  // SEPARATE field because the seed writes oneTime:false on ordinary cats, so
+  // oneTime===false can't be trusted as "the user unchecked it".
+  if (c.oneTimeUser === true) return true;
+  if (c.oneTimeUser === false) return false;
+  if (c.oneTime) return true;                 // legacy/seed/migration flag (truthy only)
+  if (ONE_TIME_INCOME.has(c.id)) return true; // gift / seed / windfall income
+  const g = GROUPS.find((x) => x.id === c.group);
+  return !!(g && g.excludeFromBaseline);       // Big Events group
+}
 function catProjectsDefault(catId){
   if (catId === '__uncat') return true;
   const c = DATA.cats[catId];
   if (!c) return true;
-  if (ONE_TIME_INCOME.has(catId) || c.oneTime) return false;
-  const g = GROUPS.find((x) => x.id === c.group);
-  if (g && g.excludeFromBaseline) return false;
-  return true;
+  return !catIsOneTime(c);
 }
 // Per-transaction override wins: projFuture true/false forces it; null = auto.
 function txnProjects(t, catId){
@@ -816,12 +828,7 @@ function txnProjects(t, catId){
   return catProjectsDefault(catId);
 }
 // Category is kept out of baseline/budget suggestions (natural-month math).
-function catExcludedFromEstimates(c){
-  if (!c) return false;
-  if (c.oneTime || ONE_TIME_INCOME.has(c.id)) return true;
-  const g = GROUPS.find((x) => x.id === c.group);
-  return !!(g && g.excludeFromBaseline);
-}
+function catExcludedFromEstimates(c){ return catIsOneTime(c); }
 // {ym: {spend: {catId: cents}, spendTotal, incomeTotal}} across all live, non-excluded txns.
 function buildMonthAgg(acctId){
   const out = {};
@@ -3424,7 +3431,6 @@ function openAddCatModal(gid, presetSub, after){
 function openCatEditor(catId, after){
   const cat = DATA.cats[catId];
   if (!cat) return;
-  const forcedOneTime = ONE_TIME_INCOME.has(cat.id) || (() => { const g = GROUPS.find((x) => x.id === cat.group); return !!(g && g.excludeFromBaseline); })();
   const isSystem = cat.group === 'g-sys';
   const curKind = cat.kind || 'expense';
   const kindSel = isSystem ? '' :
@@ -3442,8 +3448,8 @@ function openCatEditor(catId, after){
     '<label class="fld"><span>Icon</span><input type="text" data-x="ic" maxlength="4" value="' + esc(cat.icon || '') + '"></label>' +
     kindSel + subSel +
     '<label class="row" style="margin:0 0 12px"><input type="checkbox" data-x="ot" style="width:auto"' +
-      ((cat.oneTime || forcedOneTime) ? ' checked' : '') + (forcedOneTime ? ' disabled' : '') + '> ' +
-      '<span class="muted">One-time — exclude from future forecasts &amp; the baseline' + (forcedOneTime ? ' (always, for this group)' : '') + '</span></label>' +
+      (catIsOneTime(cat) ? ' checked' : '') + '> ' +
+      '<span class="muted">One-time — leave OUT of forecasts &amp; the baseline. On by default for gifts, seed money, and one-off events; uncheck if this category actually recurs for you.</span></label>' +
     (isSystem ? '' :
       '<label class="row" style="margin:0 0 12px"><input type="checkbox" data-x="seasonal" style="width:auto"' + (cat.seasonal ? ' checked' : '') + '> ' +
       '<span class="muted">Seasonal — only bills certain months (lawn, pool). Its cost is spread across the year so it doesn’t inflate the months it lands in. Leave off for bills like mortgage or car payments.</span></label>') +
@@ -3457,7 +3463,7 @@ function openCatEditor(catId, after){
     cat.name = name; cat.icon = m.node.querySelector('[data-x=ic]').value.trim() || '•';
     if (!isSystem) cat.kind = m.node.querySelector('[data-x=kind]').value;
     if (!isSystem){ const sv = m.node.querySelector('[data-x=sub]').value.trim(); if (sv) cat.sub = sv; else delete cat.sub; }
-    if (!forcedOneTime) cat.oneTime = m.node.querySelector('[data-x=ot]').checked;
+    cat.oneTimeUser = m.node.querySelector('[data-x=ot]').checked; // explicit user choice; overrides all defaults
     if (!isSystem) cat.seasonal = m.node.querySelector('[data-x=seasonal]').checked;
     put('cats', cat); m.close(); if (after) after(); renderCurrent(); toast('Category updated');
   };
