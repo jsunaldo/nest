@@ -113,6 +113,8 @@ label.fld span{display:block; font-size:12px; color:var(--dim); margin-bottom:4p
 .month-nav b{min-width:110px; text-align:center; font-size:16px}
 .month-nav button{background:var(--card); border:1px solid var(--line); color:var(--text); width:32px; height:32px;
   border-radius:999px; cursor:pointer}
+.ynav-sel{min-width:130px; text-align:center; text-align-last:center; font-size:16px; font-weight:700; color:var(--text);
+  background:var(--card); border:1px solid var(--line); border-radius:999px; padding:5px 12px; cursor:pointer; -webkit-appearance:none; appearance:none}
 
 /* modal + toast */
 #modal-root .overlay{position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:60; display:flex;
@@ -254,7 +256,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v4.8'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v4.9'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -880,7 +882,8 @@ function suggestBudgets(agg, year){
 function yearStats(agg, year){
   agg = agg || buildMonthAgg();
   const cur = currentYM();
-  const months = Object.keys(agg).filter((ym) => ym.slice(0, 4) === year).sort();
+  // year === 'all' → every month (the "Overall" lens); no forward projection.
+  const months = (year === 'all' ? Object.keys(agg) : Object.keys(agg).filter((ym) => ym.slice(0, 4) === year)).sort();
   const st = { year, months, fullMonths: months.filter((ym) => ym < cur),
                spend: 0, income: 0, invest: 0, oneTime: 0, incomeRecur: 0, spendOneTimeAgg: 0,
                byCat: {}, incomeByCat: {}, investByCat: {}, perMonth: [] };
@@ -1319,6 +1322,24 @@ function catLabel(catId){
   const c = DATA.cats[catId];
   return c ? { icon: c.icon || '•', name: c.name } : { icon: '•', name: catId };
 }
+// A category FILTER value is one of: null (all), '__uncat', a category id, a whole
+// group ('g:<gid>'), or a subcategory ('sub:<gid>|<name>'). These two helpers label
+// it and test whether a given category id falls under it.
+function catFilterLabel(v){
+  if (!v) return 'All categories';
+  if (v === '__uncat') return '❓ Uncategorized';
+  if (v.slice(0, 2) === 'g:'){ const g = GROUPS.find((x) => x.id === v.slice(2)); return g ? (g.icon || '📂') + ' ' + g.name : 'Group'; }
+  if (v.slice(0, 4) === 'sub:'){ const bar = v.indexOf('|'), gid = v.slice(4, bar), s = v.slice(bar + 1); return subIcon(gid, s) + ' ' + s; }
+  const cl = catLabel(v); return cl.icon + ' ' + cl.name;
+}
+function catValueMatches(catId, v){
+  catId = catId || '__uncat';
+  if (!v) return true;
+  if (v === '__uncat') return catId === '__uncat';
+  if (v.slice(0, 2) === 'g:'){ const c = DATA.cats[catId]; return !!(c && c.group === v.slice(2)); }
+  if (v.slice(0, 4) === 'sub:'){ const bar = v.indexOf('|'), gid = v.slice(4, bar), s = v.slice(bar + 1); const c = DATA.cats[catId]; return !!(c && c.group === gid && c.sub === s); }
+  return catId === v;
+}
 
 /* ============================ ROUTER ============================ */
 let CURRENT_TAB = 'home';
@@ -1366,6 +1387,9 @@ let LAST_IMPORT_ACCT = null;
 const REVIEW_SKIP = new Set();
 const REVIEW = { mode: 'sort', month: null, acct: null }; // Review tab: auto-sort queue vs manual verify pass
 let HOME_BL = 'overall'; // Bottom Line lens: overall | recurring | oneoff
+let HOME_YEAR = 'all';   // Home year lens: 'all' (Overall, default) or a 'YYYY'
+let ACCT_YEAR = 'all';   // Account-popup year lens: 'all' or a 'YYYY'
+const yearLabel = (y) => (y === 'all' ? 'Overall' : y);
 const ACT = { q: '', acct: null, cat: null, year: null, mo: null, status: null, limit: 200, select: false, sel: new Set() };
 function actSetMonth(ym){ if (ym){ ACT.year = ym.slice(0, 4); ACT.mo = ym.slice(5, 7); } else { ACT.year = null; ACT.mo = null; } }
 const TRENDS_SEL = { month: null };
@@ -1537,9 +1561,18 @@ function openCatTreePicker(opts){
     let done = false;
     const open = new Set();
     if (opts.current && DATA.cats[opts.current]){ const cc = DATA.cats[opts.current]; open.add('g:' + cc.group); if (cc.sub) open.add('sub:' + cc.group + '|' + cc.sub); }
-    const m = modal('Filter by category', '<div data-x="tbody"></div>', () => { if (!done){ done = true; resolve(undefined); } });
+    const m = modal('Filter by category', '<p class="tiny" style="margin:0 0 8px">Tap a group or subcategory to include <b>everything under it</b>, or hit ▸ to drill into one category.</p><div data-x="tbody"></div>', () => { if (!done){ done = true; resolve(undefined); } });
     const body = m.node.querySelector('[data-x=tbody]');
     const pick = (id) => { done = true; resolve(id); m.close(); };
+    // A selectable branch row (group / subcategory): the body picks the whole
+    // branch; the chevron on the right only expands/collapses.
+    const branch = (lvl, pickVal, icon, name, togKey) => {
+      const on = opts.current === pickVal, sOpen = open.has(togKey);
+      return '<div class="tree-row ' + lvl + '" data-pick="' + esc(pickVal) + '" style="cursor:pointer"><span class="ic">' + icon + '</span>' +
+        '<div class="body"><div class="t1">' + esc(name) + '</div></div>' +
+        (on ? '<span class="chev" style="color:var(--accent)">✓</span>' : '') +
+        '<span class="chev" data-tog="' + togKey + '">' + (sOpen ? '▾' : '▸') + '</span></div>';
+    };
     const leaf = (cat, lvl) => { const on = opts.current === cat.id; return '<div class="tree-row ' + lvl + '" data-pick="' + esc(cat.id) + '"><span class="ic">' + esc(cat.icon || '•') + '</span><div class="body"><div class="t1">' + esc(cat.name) + '</div></div><span class="chev">' + (on ? '✓' : '') + '</span></div>'; };
     function draw(){
       let html = '<div class="tree-row grp" data-pick="__all"><span class="ic">✳️</span><div class="body"><div class="t1">All categories</div></div><span class="chev">' + (!opts.current ? '✓' : '') + '</span></div>' +
@@ -1549,19 +1582,20 @@ function openCatTreePicker(opts){
         const cats = liveCats().filter((c) => c.group === g.id);
         if (!cats.length) continue;
         const gkey = 'g:' + g.id, gOpen = open.has(gkey);
-        html += '<div class="tree-row grp" data-tog="' + gkey + '"><span class="ic">' + (g.icon || '📂') + '</span><div class="body"><div class="t1">' + esc(g.name) + '</div></div><span class="chev">' + (gOpen ? '▾' : '▸') + '</span></div>';
+        html += branch('grp', gkey, (g.icon || '📂'), g.name, gkey);
         if (!gOpen) continue;
         const bySub = {}, direct = [];
         for (const c of cats){ if (c.sub){ (bySub[c.sub] = bySub[c.sub] || []).push(c); } else direct.push(c); }
         for (const c of direct) html += leaf(c, 'tree-l1');
         for (const s in bySub){
           const skey = 'sub:' + g.id + '|' + s, sOpen = open.has(skey);
-          html += '<div class="tree-row tree-l1" data-tog="' + skey + '"><span class="ic">' + subIcon(g.id, s) + '</span><div class="body"><div class="t1">' + esc(s) + '</div></div><span class="chev">' + (sOpen ? '▾' : '▸') + '</span></div>';
+          html += branch('tree-l1', skey, subIcon(g.id, s), s, skey);
           if (sOpen) for (const c of bySub[s]) html += leaf(c, 'tree-l2');
         }
       }
       body.innerHTML = html;
-      body.querySelectorAll('[data-tog]').forEach((r) => { r.onclick = () => { const k = r.dataset.tog; if (open.has(k)) open.delete(k); else open.add(k); draw(); }; });
+      // Chevron toggles expand (and must not also trigger the row's pick).
+      body.querySelectorAll('[data-tog]').forEach((r) => { r.onclick = (e) => { e.stopPropagation(); const k = r.dataset.tog; if (open.has(k)) open.delete(k); else open.add(k); draw(); }; });
       body.querySelectorAll('[data-pick]').forEach((r) => { r.onclick = () => pick(r.dataset.pick === '__all' ? null : r.dataset.pick); });
     }
     draw();
@@ -1980,17 +2014,19 @@ function renderHome(){
   }
   const agg = buildMonthAgg();
   const years = Array.from(new Set(Object.keys(agg).map((ym) => ym.slice(0, 4)))).sort();
-  const curYear = currentYM().slice(0, 4);
-  if (!UI.year || !years.includes(UI.year)) UI.year = years.includes(curYear) ? curYear : years[years.length - 1];
-  const yi = years.indexOf(UI.year);
-  const st = yearStats(agg, UI.year);
+  // Year lens: 'all' (Overall) is the default; arrows/dropdown step through it + each year.
+  const yearSeq = ['all'].concat(years);
+  if (HOME_YEAR !== 'all' && !years.includes(HOME_YEAR)) HOME_YEAR = 'all';
+  const yi = yearSeq.indexOf(HOME_YEAR);
+  const st = yearStats(agg, HOME_YEAR);
   const baseline = baselineByCat(agg);
   const rq = reviewTxns();
   const rqOut = rq.reduce((s, t) => s + (t.amt < 0 ? -t.amt : 0), 0);
   const rqIn = rq.reduce((s, t) => s + (t.amt > 0 ? t.amt : 0), 0);
 
-  let html = '<div class="month-nav"><button data-x="prev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button><b>' + esc(UI.year) + '</b>' +
-    '<button data-x="next"' + (yi >= years.length - 1 ? ' disabled' : '') + '>›</button></div>';
+  let html = '<div class="month-nav"><button data-x="prev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button>' +
+    '<select data-x="ysel" class="ynav-sel">' + yearSeq.map((y) => '<option value="' + y + '"' + (y === HOME_YEAR ? ' selected' : '') + '>' + esc(yearLabel(y)) + '</option>').join('') + '</select>' +
+    '<button data-x="next"' + (yi >= yearSeq.length - 1 ? ' disabled' : '') + '>›</button></div>';
 
   // Account balances — each account listed with its current balance (or a prompt
   // to set one). Header shows the net across everything.
@@ -2044,7 +2080,7 @@ function renderHome(){
     // Projection strip (overall/recurring only).
     (proj
       ? '<div class="bl-proj ' + (proj.net >= 0 ? 'good' : 'bad') + '">' +
-        '<div class="grow"><div class="tiny" style="text-transform:uppercase;letter-spacing:.5px">Projected end of ' + esc(UI.year) + '</div>' +
+        '<div class="grow"><div class="tiny" style="text-transform:uppercase;letter-spacing:.5px">Projected end of ' + esc(HOME_YEAR) + '</div>' +
         '<b style="font-size:19px;color:' + (proj.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(proj.net, { signed: true }) + '</b> ' +
         '<span class="tiny">' + (proj.net >= 0 ? '▲ on track to come out ahead' : '▼ on pace to go under') + '</span></div>' +
         '<div class="tiny" style="text-align:right;white-space:nowrap">' + fmt$(proj.rateIncome) + '/mo in<br>' + fmt$(proj.rateSpend) + '/mo out</div></div>'
@@ -2074,9 +2110,9 @@ function renderHome(){
     html += yearChartsHTML(agg, st.months, chartSel, baseline);
   }
 
-  const cuts = cutSuggestions(agg, UI.year);
+  const cuts = cutSuggestions(agg, HOME_YEAR);
   if (cuts.length){
-    html += '<div class="card"><h3>Where to cut</h3><p class="tiny" style="margin:0 0 6px">Most over their expected pace in ' + esc(UI.year) + ' (full months only)</p>' +
+    html += '<div class="card"><h3>Where to cut</h3><p class="tiny" style="margin:0 0 6px">Most over their expected pace' + (HOME_YEAR === 'all' ? ' (all time' : ' in ' + esc(HOME_YEAR) + ' (') + ', full months only)</p>' +
       cuts.map((x) => '<div class="list-item" data-cat="' + esc(x.cat.id) + '"><span class="ic">' + esc(x.cat.icon || '•') + '</span>' +
         '<div class="body"><div class="t1">' + esc(x.cat.name) + '</div><div class="t2">' + fmt$(x.ytd) + ' spent vs ' + fmt$(x.expected) + ' expected</div></div>' +
         '<span class="amt" style="color:var(--status-crit)">+' + fmt$(x.over) + '</span></div>').join('') + '</div>';
@@ -2089,7 +2125,7 @@ function renderHome(){
   // scan than one flat list.
   const gc = groupedCatHTML(st.byCat, st.incomeByCat, st.investByCat, { pfx: 'y' });
   if (gc)
-    html += '<div class="card"><h3>' + esc(UI.year) + ' by category</h3>' +
+    html += '<div class="card"><h3>' + esc(yearLabel(HOME_YEAR)) + ' by category</h3>' +
       '<p class="tiny" style="margin:0 0 4px">Tap a group or subcategory to expand · tap a category to open it</p>' +
       gc + '</div>';
 
@@ -2111,8 +2147,9 @@ function renderHome(){
   html += '<button class="btn btn-primary btn-block" data-x="import" style="margin-bottom:16px">📥 Import statements</button>';
   c.innerHTML = html;
 
-  c.querySelector('[data-x=prev]').onclick = () => { UI.year = years[yi - 1]; renderHome(); };
-  c.querySelector('[data-x=next]').onclick = () => { UI.year = years[yi + 1]; renderHome(); };
+  c.querySelector('[data-x=prev]').onclick = () => { HOME_YEAR = yearSeq[yi - 1]; renderHome(); };
+  c.querySelector('[data-x=next]').onclick = () => { HOME_YEAR = yearSeq[yi + 1]; renderHome(); };
+  c.querySelector('[data-x=ysel]').onchange = (e) => { HOME_YEAR = e.target.value; renderHome(); };
   const on = (sel, fn) => { const n2 = c.querySelector(sel); if (n2) n2.onclick = fn; };
   on('[data-x=rev]', () => showTab('review'));
   on('[data-x=recur]', () => showTab('recurring'));
@@ -2156,10 +2193,10 @@ function renderAccountModal(c, acctId, close){
   if (!a){ if (close) close(); return; }
   const agg = buildMonthAgg(acctId);
   const years = Array.from(new Set(Object.keys(agg).map((ym) => ym.slice(0, 4)))).sort();
-  const curYear = currentYM().slice(0, 4);
-  if (!UI.year || !years.includes(UI.year)) UI.year = years.includes(curYear) ? curYear : (years[years.length - 1] || curYear);
-  const yi = years.indexOf(UI.year);
-  const st = yearStats(agg, UI.year);
+  const yearSeq = ['all'].concat(years);
+  if (ACCT_YEAR !== 'all' && !years.includes(ACCT_YEAR)) ACCT_YEAR = 'all';
+  const yi = yearSeq.indexOf(ACCT_YEAR);
+  const st = yearStats(agg, ACCT_YEAR);
   const isBtc = a.type === 'btc';
 
   let html = '<div class="modal-closebar"><button class="btn btn-sm" data-x="mclose">✕ Close</button>' +
@@ -2235,9 +2272,10 @@ function renderAccountModal(c, acctId, close){
 
   // Cash-flow sections (In/Out/Net, categories, months) — not for a Bitcoin stack.
   if (!isBtc){
-    // In / Out / Net for the year, on this account.
-    html += '<div class="month-nav"><button data-x="yprev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button><b>' + esc(UI.year) + '</b>' +
-      '<button data-x="ynext"' + (yi >= years.length - 1 ? ' disabled' : '') + '>›</button></div>';
+    // In / Out / Net for the selected lens (Overall by default), on this account.
+    html += '<div class="month-nav"><button data-x="yprev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button>' +
+      '<select data-x="ysel" class="ynav-sel">' + yearSeq.map((y) => '<option value="' + y + '"' + (y === ACCT_YEAR ? ' selected' : '') + '>' + esc(yearLabel(y)) + '</option>').join('') + '</select>' +
+      '<button data-x="ynext"' + (yi >= yearSeq.length - 1 ? ' disabled' : '') + '>›</button></div>';
     const net = st.income - st.spend;
     html += '<div class="bl-row">' +
       '<div class="bl-tile"><div class="bl-v amt-pos">' + fmt$(st.income) + '</div><div class="bl-l">In</div></div>' +
@@ -2246,7 +2284,7 @@ function renderAccountModal(c, acctId, close){
 
     // Category breakdown for this account (collapsible tree).
     const gc = groupedCatHTML(st.byCat, st.incomeByCat, st.investByCat, { pfx: 'acct' });
-    if (gc) html += '<div class="card"><h3>' + esc(UI.year) + ' by category</h3>' + gc + '</div>';
+    if (gc) html += '<div class="card"><h3>' + esc(yearLabel(ACCT_YEAR)) + ' by category</h3>' + gc + '</div>';
 
     // Month by month, this account.
     if (st.perMonth.length)
@@ -2262,8 +2300,9 @@ function renderAccountModal(c, acctId, close){
 
   const q = (s) => c.querySelector(s);
   q('[data-x=mclose]').onclick = () => close && close();
-  const yp = q('[data-x=yprev]'); if (yp) yp.onclick = () => { UI.year = years[yi - 1]; renderAccountModal(c, acctId, close); };
-  const yn = q('[data-x=ynext]'); if (yn) yn.onclick = () => { UI.year = years[yi + 1]; renderAccountModal(c, acctId, close); };
+  const yp = q('[data-x=yprev]'); if (yp) yp.onclick = () => { ACCT_YEAR = yearSeq[yi - 1]; renderAccountModal(c, acctId, close); };
+  const yn = q('[data-x=ynext]'); if (yn) yn.onclick = () => { ACCT_YEAR = yearSeq[yi + 1]; renderAccountModal(c, acctId, close); };
+  const ys = q('[data-x=ysel]'); if (ys) ys.onchange = (e) => { ACCT_YEAR = e.target.value; renderAccountModal(c, acctId, close); };
   q('[data-x=edit]').onclick = () => openAccountEditor(acctId, () => { if (DATA.accounts[acctId]) renderAccountModal(c, acctId, close); else if (close) close(); });
   const sb = q('[data-x=setbal]'); if (sb) sb.onclick = () => openAccountEditor(acctId, () => renderAccountModal(c, acctId, close));
   q('[data-x=acts]').onclick = () => { if (close) close(); ACT.acct = acctId; ACT.cat = null; actSetMonth(null); showTab('activity'); };
@@ -2557,7 +2596,7 @@ function actFiltered(){
     if (ACT.mo && ymOf(t.date).slice(5, 7) !== ACT.mo) return false;
     if (ACT.status && t.status !== ACT.status) return false;
     if (ACT.cat){
-      if (!effParts(t).some((p) => (p.cat || '__uncat') === ACT.cat)) return false;
+      if (!effParts(t).some((p) => catValueMatches(p.cat, ACT.cat))) return false;
     }
     if (q && !(t.m.includes(q) || t.mraw.toUpperCase().includes(q) || (t.note || '').toUpperCase().includes(q))) return false;
     return true;
@@ -2578,7 +2617,7 @@ function renderActivity(){
   const years = dataYears();
   const yearOpts = opt('', 'All years', !ACT.year) + years.map((y) => opt(y, y, ACT.year === y)).join('');
   const moOpts = opt('', 'All months', !ACT.mo) + MONTHS.map((nm, i) => opt(String(i + 1).padStart(2, '0'), nm, ACT.mo === String(i + 1).padStart(2, '0'))).join('');
-  const catLabelTxt = ACT.cat ? (ACT.cat === '__uncat' ? '❓ Uncategorized' : catLabel(ACT.cat).icon + ' ' + catLabel(ACT.cat).name) : 'All categories';
+  const catLabelTxt = catFilterLabel(ACT.cat);
   const accts = liveAccounts();
   const accOpts = opt('', 'All accounts', !ACT.acct) + accts.map((a) => opt(a.id, a.name, ACT.acct === a.id)).join('');
   const stOpts = opt('', 'Any status', !ACT.status) + opt('review', 'Needs review', ACT.status === 'review') + opt('excluded', 'Excluded', ACT.status === 'excluded');
