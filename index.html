@@ -298,7 +298,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v7.5'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v7.6'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -2437,6 +2437,24 @@ function openGiftList(){
   const m = modal('', '<div data-x="gbody"></div>', () => renderCurrent());
   renderGiftList(m.node.querySelector('[data-x=gbody]'), m.close);
 }
+// Gifts entered before the ⏳ flag existed carry their "TBD" in the NOTE (or are just a
+// name with no amount/note). Flag those still-waiting once, so they show ⏳ like fresh
+// imports instead of a plain ⭕. A bare "TBD"/"?" note is cleared (the ⏳ says it).
+const GIFT_TBD_NOTE_RE = /^(tbd|tbc|pending|waiting|n\/?a)\b|^[?\-—]+$/i;
+function normalizeGifts(){
+  const items = giftItems(); let changed = false;
+  for (const g of items){
+    if (g.pending) continue;
+    const note = (g.note || '').trim();
+    const pureMarker = note !== '' && GIFT_TBD_RE.test(note);
+    if (pureMarker || GIFT_TBD_NOTE_RE.test(note) || (g.amt == null && note === '')){
+      g.pending = true;
+      if (pureMarker) g.note = '';
+      changed = true;
+    }
+  }
+  if (changed) saveGiftItems(items);
+}
 // Group gifts by giver (case/space-insensitive) so someone who gave more than
 // once — e.g. cash AND a physical gift — shows as ONE person with all their gifts.
 const giftKey = (name) => (name || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -2479,6 +2497,7 @@ function giftGroupHTML(grp){
   return h;
 }
 function renderGiftList(c, close){
+  normalizeGifts(); // one-time: legacy "TBD" gifts get the ⏳ pending flag
   const items = giftItems().slice();
   const groups = groupGifts(items);
   const total = items.reduce((s, g) => s + (g.pending ? 0 : (g.amt || 0)), 0);
