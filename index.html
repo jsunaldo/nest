@@ -116,8 +116,8 @@ label.fld span{display:block; font-size:12px; color:var(--dim); margin-bottom:4p
 .month-nav b{min-width:110px; text-align:center; font-size:16px}
 .month-nav button{background:var(--card); border:1px solid var(--line); color:var(--text); width:32px; height:32px;
   border-radius:999px; cursor:pointer}
-.ynav-sel{min-width:130px; text-align:center; text-align-last:center; font-size:16px; font-weight:700; color:var(--text);
-  background:var(--card); border:1px solid var(--line); border-radius:999px; padding:5px 12px; cursor:pointer; -webkit-appearance:none; appearance:none}
+.ynav-sel{width:auto; min-width:150px; max-width:60%; text-align:center; text-align-last:center; font-size:16px; font-weight:700; color:var(--text);
+  background:var(--card); border:1px solid var(--line); border-radius:999px; padding:5px 28px; cursor:pointer; -webkit-appearance:none; appearance:none}
 
 /* modal + toast */
 #modal-root .overlay{position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:60; display:flex;
@@ -259,7 +259,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v6.1'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v6.2'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1473,16 +1473,18 @@ function accountBalanceSeries(acct, year){
     if (!maxYM || ym > maxYM) maxYM = ym;
   }
   const anchored = acct.anchorBal != null && !!acct.anchorDate;
-  if (anchored){ const aym = acct.anchorDate.slice(0, 7); if (!minYM || aym < minYM) minYM = aym; }
+  const anchorYM = anchored ? acct.anchorDate.slice(0, 7) : null;
+  // The entered balance + as-of date IS the start of the chart: begin at the anchor
+  // month (never before it — the balance before then is unknown / the anchor already
+  // reflects it). Non-anchored accounts start at their first transaction.
+  if (anchored) minYM = anchorYM;
   if (!minYM) return { pts: [], anchored };
   const cur = currentYM();
   const maxKnown = maxYM && maxYM > cur ? maxYM : cur; // balance is known through today (or last dated txn)
-  // Real range only: first month (the account's opening / first activity) → last
-  // known month. Scoped to a year, that's the year's slice — so a year in which the
-  // account was opened starts at the opening month with the opening balance.
   const months = []; for (let y = minYM; y <= maxKnown; y = shiftYM(y, 1)){ months.push(y); if (months.length > 600) break; }
   const cumAt = (ym) => { let r = 0; for (const k in monthly) if (k <= ym) r += monthly[k]; return r; };
-  let pts = months.map((ym) => ({ ym, bal: anchored ? accountBalanceAt(acct, ym + '-31') : cumAt(ym) }));
+  // First point = the entered balance exactly; each later month adds its transactions.
+  let pts = months.map((ym) => ({ ym, bal: anchored ? (ym === anchorYM ? acct.anchorBal : accountBalanceAt(acct, ym + '-31')) : cumAt(ym) }));
   if (year && year !== 'all'){
     // Clamp to the year's activity range: first activity month (or the account's
     // opening if it opened that year) → last activity month. No leading carry-in.
@@ -1502,9 +1504,15 @@ function combinedBalanceSeries(year){
   const anchoredAccts = accts.filter((a) => a.type !== 'btc' && a.anchorBal != null && a.anchorDate);
   const btcAccts = accts.filter((a) => a.type === 'btc');
   const valued = anchoredAccts.length > 0 || btcAccts.length > 0;
+  // Net worth is only known from when accounts became known: the earliest cash anchor
+  // (as-of date) or first Bitcoin buy. Non-valued fallback tracks from the first txn.
   let minYM = null;
-  for (const t of liveTxns()){ if (!t.date) continue; const ym = t.date.slice(0, 7); if (!minYM || ym < minYM) minYM = ym; }
-  for (const a of anchoredAccts){ const ym = a.anchorDate.slice(0, 7); if (!minYM || ym < minYM) minYM = ym; }
+  if (valued){
+    for (const a of anchoredAccts){ const ym = a.anchorDate.slice(0, 7); if (!minYM || ym < minYM) minYM = ym; }
+    for (const a of btcAccts){ for (const id in DATA.txns){ const t = DATA.txns[id]; if (t.deleted || t.acct !== a.id || !t.date) continue; const ym = t.date.slice(0, 7); if (!minYM || ym < minYM) minYM = ym; } }
+  } else {
+    for (const t of liveTxns()){ if (!t.date) continue; const ym = t.date.slice(0, 7); if (!minYM || ym < minYM) minYM = ym; }
+  }
   if (!minYM) return { pts: [], anchored: valued };
   const maxKnown = currentYM(); // net worth is known through today, not the future
   // Real range only (first activity / account opening → today); scoped to a year
