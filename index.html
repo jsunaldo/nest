@@ -250,7 +250,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v4.1'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v4.2'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -447,6 +447,16 @@ function runMigrations(){
     if (!DATA.cats['tr-car-s'])
       put('cats', { id: 'tr-car-s', group: 'g-tr', sub: 'Car Payment', name: 'Shannon Car Payment', icon: '🚗', kind: 'expense' });
     put('kv', { id: 'migrations', v: 1 });
+  }
+  if (cur < 2){
+    // v4.2 — Paycheck and Seed Money split per person (Jason / Shannon).
+    setCat('inc-pay', { name: 'Jason Paycheck', sub: 'Paycheck' });
+    if (!DATA.cats['inc-pay-s'])
+      put('cats', { id: 'inc-pay-s', group: 'g-inc', sub: 'Paycheck', name: 'Shannon Paycheck', icon: '💵', kind: 'income' });
+    setCat('inc-seed', { name: 'Jason Seed Money', sub: 'Seed Money' });
+    if (!DATA.cats['inc-seed-s'])
+      put('cats', { id: 'inc-seed-s', group: 'g-inc', sub: 'Seed Money', name: 'Shannon Seed Money', icon: '🏦', kind: 'income', oneTime: true });
+    put('kv', { id: 'migrations', v: 2 });
   }
 }
 // Distinct subcategory names used within a group (in category order).
@@ -744,7 +754,7 @@ function effParts(t){
 // (seed money, gifts, windfalls) and one-time-outflow groups (House Setup, Big
 // Events/Wedding) do not; everything else — paychecks, mortgage, groceries,
 // even gifts you GIVE — does, because it realistically recurs.
-const ONE_TIME_INCOME = new Set(['inc-other', 'inc-seed', 'inc-gift', 'inc-wedgift']);
+const ONE_TIME_INCOME = new Set(['inc-other', 'inc-seed', 'inc-seed-s', 'inc-gift', 'inc-wedgift']);
 function catProjectsDefault(catId){
   if (catId === '__uncat') return true;
   const c = DATA.cats[catId];
