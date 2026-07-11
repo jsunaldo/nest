@@ -238,6 +238,14 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 .cmonth-detail{background:var(--card2); border-radius:10px; margin:0 0 6px; padding:2px 8px}
 .cmonth-detail .list-item{cursor:default}
 .cmonth-detail .list-item:last-child{border-bottom:none}
+/* small inline action button sitting in a category row (e.g. gift registry) */
+.row-btn{background:var(--card2); border:1px solid var(--line); color:var(--text); border-radius:999px;
+  font-size:12px; font-weight:600; padding:5px 11px; margin:0 8px; cursor:pointer; flex-shrink:0; white-space:nowrap}
+.row-btn:active{background:var(--line)}
+/* gift registry rows */
+.gift-row .gift-thx{cursor:pointer; font-size:18px; opacity:.85}
+.gift-row .gift-thx.on{opacity:1}
+.gift-row .amt{color:var(--status-good)}
 .tree-act{color:var(--accent); font-size:17px; padding:2px 6px; flex-shrink:0; cursor:pointer}
 .tree-l1{margin-left:6px; border-left:2px solid var(--line); padding-left:12px}
 .tree-l2{margin-left:14px; border-left:2px solid var(--line); padding-left:16px}
@@ -284,7 +292,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v6.9'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v7.0'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -2126,7 +2134,10 @@ function groupedCatHTML(spendMap, incomeMap, investMap, opts){
     '<div class="tree-row tree-l1" data-cmval="sub:' + esc(gid + '|' + s) + '" data-btk="' + esc(pfx + ':sub:' + gid + '|' + s) + '" style="cursor:pointer"><span class="ic">' + subIcon(gid, s) + '</span>' +
     '<div class="body"><div class="t1">' + esc(s) + '</div></div><span class="amt">' + amtStr + '</span>' +
     '<span class="chev tog" data-btog="' + esc(pfx + ':sub:' + gid + '|' + s) + '">' + (open ? '▾' : '▸') + '</span></div>';
-  const catLeaf = (cid, amtStr, color, lvl) => { const cl = catLabel(cid); return '<div class="tree-row ' + lvl + '" data-cat="' + esc(cid) + '"><span class="ic">' + cl.icon + '</span><div class="body"><div class="t1">' + esc(cl.name) + '</div></div><span class="amt" style="color:' + color + '"><span class="chev"></span>' + amtStr + '</span></div>'; };
+  const catLeaf = (cid, amtStr, color, lvl) => { const cl = catLabel(cid);
+    // Wedding Gifts carries a shortcut to its itemized registry (who gave what).
+    const xtra = cid === 'inc-wedgift' ? '<button class="row-btn" data-giftlist="1" title="Gift registry">🎁 List</button>' : '';
+    return '<div class="tree-row ' + lvl + '" data-cat="' + esc(cid) + '"><span class="ic">' + cl.icon + '</span><div class="body"><div class="t1">' + esc(cl.name) + '</div></div>' + xtra + '<span class="amt" style="color:' + color + '"><span class="chev"></span>' + amtStr + '</span></div>'; };
   let html = '';
   for (const g of GROUPS){
     if (g.kind === 'system') continue;
@@ -2303,6 +2314,7 @@ function renderHome(){
   // scoped popup; the chevron (data-btog) expands/collapses the branch in place.
   c.querySelectorAll('[data-cat]').forEach((n2) => { n2.onclick = () => openCategoryModal(n2.dataset.cat); });
   c.querySelectorAll('[data-cmval]').forEach((n2) => { n2.onclick = () => openCategoryModal(n2.dataset.cmval); });
+  c.querySelectorAll('[data-giftlist]').forEach((n2) => { n2.onclick = (e) => { e.stopPropagation(); openGiftList(); }; });
   c.querySelectorAll('[data-btog]').forEach((r) => {
     r.onclick = (e) => { e.stopPropagation(); const k = r.dataset.btog; if (BREAKDOWN_OPEN.has(k)) BREAKDOWN_OPEN.delete(k); else BREAKDOWN_OPEN.add(k); renderHome(); };
   });
@@ -2356,6 +2368,126 @@ function catBarChartHTML(months, vals, budget, avg, curYM){
     avg > 0 ? { c: 'var(--blue)', label: 'avg ' + fmt$(avg) } : null,
     budget > 0 ? { c: 'var(--accent)', label: 'budget ' + fmt$(budget) } : null ]);
   return '<div class="chart-wrap"><svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" xmlns="http://www.w3.org/2000/svg">' + s + '</svg></div>' + refs;
+}
+/* ---- Wedding-gift registry (who gave what) — a synced kv singleton on DATA.kv.gifts.
+   Independent of the Wedding Gifts transactions; a gift may be money and/or an item. ---- */
+function giftItems(){ return (DATA.kv.gifts && DATA.kv.gifts.items) || []; }
+function saveGiftItems(items){ put('kv', { id: 'gifts', items: items }); }
+// Parse pasted spreadsheet rows: one gift per line, cells split by tab (Excel copy)
+// or comma. First cell = giver; a cell that reads as money = amount; the rest = note.
+function parseGiftPaste(text){
+  const rows = [];
+  for (const raw of String(text || '').split(/\r?\n/)){
+    const line = raw.trim();
+    if (!line) continue;
+    const cells = (line.indexOf('\t') >= 0 ? line.split('\t') : line.split(',')).map((s) => s.trim());
+    const name = cells[0];
+    if (!name) continue;
+    let amt = null; const noteParts = [];
+    for (let i = 1; i < cells.length; i++){
+      const cents = /\d/.test(cells[i]) ? parseAmountCents(cells[i]) : null;
+      if (amt === null && cents !== null) amt = cents;
+      else if (cells[i]) noteParts.push(cells[i]);
+    }
+    // skip an obvious header row ("Name / Guest / From …" with no money)
+    if (amt === null && /^(name|guest|from|giver|gift)s?$/i.test(name)) continue;
+    rows.push({ name: name, amt: amt, note: noteParts.join(' · ') });
+  }
+  return rows;
+}
+function openGiftList(){
+  const m = modal('', '<div data-x="gbody"></div>', () => renderCurrent());
+  renderGiftList(m.node.querySelector('[data-x=gbody]'), m.close);
+}
+function giftRowHTML(g){
+  return '<div class="list-item gift-row" data-giftedit="' + esc(g.id) + '" style="cursor:pointer">' +
+    '<span class="ic gift-thx' + (g.thanked ? ' on' : '') + '" data-thx="' + esc(g.id) + '" title="' + (g.thanked ? 'Thanked' : 'Mark thanked') + '">' + (g.thanked ? '✅' : '⭕') + '</span>' +
+    '<div class="body"><div class="t1">' + esc(g.name || '—') + '</div>' + (g.note ? '<div class="t2">' + esc(g.note) + '</div>' : '') + '</div>' +
+    '<span class="amt">' + (g.amt != null ? fmt$(g.amt) : '') + '</span></div>';
+}
+function renderGiftList(c, close){
+  const items = giftItems().slice().sort((a, b) => (b.amt || 0) - (a.amt || 0) || (a.name || '').localeCompare(b.name || ''));
+  const total = items.reduce((s, g) => s + (g.amt || 0), 0);
+  const thanked = items.filter((g) => g.thanked).length;
+  let html = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">' +
+    '<b style="font-size:17px">🎁 Wedding Gift Registry</b>' +
+    '<button class="btn btn-sm" data-x="close">✕ Close</button></div>';
+  html += '<div class="bl-row">' +
+    '<div class="bl-tile"><div class="bl-v">' + items.length + '</div><div class="bl-l">Gifts</div></div>' +
+    '<div class="bl-tile"><div class="bl-v" style="color:var(--status-good)">' + fmt$(total) + '</div><div class="bl-l">Total received</div></div>' +
+    '<div class="bl-tile"><div class="bl-v">' + thanked + '<span style="color:var(--dim)">/' + items.length + '</span></div><div class="bl-l">Thanked</div></div></div>';
+  html += '<div class="row" style="margin:2px 0 12px">' +
+    '<button class="btn grow" data-x="import">📋 Paste from Excel</button>' +
+    '<button class="btn btn-primary grow" data-x="add">＋ Add gift</button></div>';
+  html += items.length
+    ? '<div class="card" style="padding:2px 12px">' + items.map(giftRowHTML).join('') + '</div>' +
+      '<p class="tiny" style="margin:8px 0 16px">Tap ⭕ to mark a thank-you sent · tap a row to edit.</p>'
+    : '<div class="empty" style="margin-bottom:16px">No gifts yet — paste your list from Excel, or add them one at a time.</div>';
+  c.innerHTML = html;
+  const q = (s) => c.querySelector(s);
+  const rerender = () => renderGiftList(c, close);
+  q('[data-x=close]').onclick = () => close && close();
+  q('[data-x=add]').onclick = () => openGiftEditor(null, rerender);
+  q('[data-x=import]').onclick = () => openGiftImport(rerender);
+  c.querySelectorAll('[data-thx]').forEach((n) => { n.onclick = (e) => {
+    e.stopPropagation();
+    const items2 = giftItems().slice(); const g = items2.find((x) => x.id === n.dataset.thx);
+    if (g){ g.thanked = !g.thanked; saveGiftItems(items2); rerender(); }
+  }; });
+  c.querySelectorAll('[data-giftedit]').forEach((n) => { n.onclick = () => openGiftEditor(n.dataset.giftedit, rerender); });
+}
+function openGiftEditor(id, after){
+  const existing = id ? giftItems().find((x) => x.id === id) : null;
+  const g = existing ? Object.assign({}, existing) : { id: 'gift_' + uid(), name: '', amt: null, note: '', thanked: false };
+  const m = modal(id ? 'Edit gift' : 'Add gift',
+    '<label class="fld"><span>From (who gave it)</span><input type="text" data-x="nm" value="' + esc(g.name || '') + '" placeholder="Aunt Sue"></label>' +
+    '<label class="fld"><span>Amount (leave blank for a non-cash gift)</span><input type="number" step="0.01" inputmode="decimal" data-x="amt" value="' + (g.amt != null ? (g.amt / 100) : '') + '" placeholder="e.g. 200"></label>' +
+    '<label class="fld"><span>Gift / note</span><input type="text" data-x="note" value="' + esc(g.note || '') + '" placeholder="check, KitchenAid mixer, …"></label>' +
+    '<label class="row" style="align-items:center;gap:8px;margin:2px 0 12px;cursor:pointer"><input type="checkbox" data-x="thx"' + (g.thanked ? ' checked' : '') + '><span>Thank-you note sent</span></label>' +
+    '<div class="row"><button class="btn btn-primary grow" data-x="save">Save</button>' +
+    (id ? '<button class="btn btn-danger" data-x="del">Delete</button>' : '') + '</div>');
+  m.node.querySelector('[data-x=save]').onclick = () => {
+    const name = m.node.querySelector('[data-x=nm]').value.trim();
+    if (!name){ toast('Add a name'); return; }
+    const amtRaw = m.node.querySelector('[data-x=amt]').value.trim();
+    g.name = name;
+    g.amt = amtRaw === '' ? null : parseAmountCents(amtRaw);
+    g.note = m.node.querySelector('[data-x=note]').value.trim();
+    g.thanked = m.node.querySelector('[data-x=thx]').checked;
+    const items = giftItems().slice();
+    const i = items.findIndex((x) => x.id === g.id);
+    if (i >= 0) items[i] = g; else items.push(g);
+    saveGiftItems(items); m.close(); if (after) after();
+  };
+  const del = m.node.querySelector('[data-x=del]');
+  if (del) del.onclick = async () => {
+    if (!(await confirmDlg('Delete this gift from the registry?', 'Delete'))) return;
+    saveGiftItems(giftItems().filter((x) => x.id !== g.id)); m.close(); if (after) after();
+  };
+}
+function openGiftImport(after){
+  const m = modal('Paste gift list',
+    '<p class="tiny" style="margin:0 0 8px">Copy the rows from your Excel and paste below — one gift per line. Nest reads the <b>first cell as the giver</b>, a cell that looks like money as the <b>amount</b>, and the rest as a <b>note</b>. A header row is skipped.</p>' +
+    '<textarea data-x="paste" rows="8" placeholder="Aunt Sue    500    check&#10;Uncle Bob    KitchenAid mixer&#10;The Smiths    250"></textarea>' +
+    '<div data-x="preview" class="tiny" style="margin:8px 0;min-height:16px;color:var(--dim)"></div>' +
+    '<div class="row"><button class="btn grow" data-x="add">Add to list</button><button class="btn btn-primary grow" data-x="replace">Replace list</button></div>');
+  const ta = m.node.querySelector('[data-x=paste]'), prev = m.node.querySelector('[data-x=preview]');
+  ta.oninput = () => { const r = parseGiftPaste(ta.value); const tot = r.reduce((s, g) => s + (g.amt || 0), 0);
+    prev.textContent = r.length ? ('Found ' + r.length + ' gift' + (r.length === 1 ? '' : 's') + (tot ? ' · ' + fmt$(tot) + ' total' : '')) : ''; };
+  const commit = (replace) => {
+    const parsed = parseGiftPaste(ta.value);
+    if (!parsed.length){ toast('Nothing recognized to import'); return; }
+    const prevThx = {}; if (replace) for (const g of giftItems()) if (g.thanked) prevThx[(g.name || '').toLowerCase()] = true;
+    const items = replace ? [] : giftItems().slice();
+    for (const p of parsed) items.push({ id: 'gift_' + uid(), name: p.name, amt: p.amt, note: p.note, thanked: replace ? !!prevThx[(p.name || '').toLowerCase()] : false });
+    saveGiftItems(items); m.close(); if (after) after();
+    toast('Imported ' + parsed.length + ' gift' + (parsed.length === 1 ? '' : 's'));
+  };
+  m.node.querySelector('[data-x=add]').onclick = () => commit(false);
+  m.node.querySelector('[data-x=replace]').onclick = async () => {
+    if (giftItems().length && !(await confirmDlg('Replace the whole registry with what you pasted?', 'Replace'))) return;
+    commit(true);
+  };
 }
 // Popup for one category (from the Home "by category" breakdown). Income → an
 // over-time line; expense → monthly spend bars vs the budget so you see over/under.
@@ -2433,6 +2565,8 @@ function renderCategoryModal(c, catId, close){
     }).join('') + '</div>';
   }
 
+  if (catId === 'inc-wedgift')
+    html += '<button class="btn btn-block" data-x="giftlist" style="margin-bottom:10px">🎁 Gift registry — who gave what</button>';
   html += '<div class="row" style="margin-bottom:16px">' +
     (editTarget ? '<button class="btn grow" data-x="edit">' + (editTarget.sub ? '✏️ Edit subcategory' : '⚙️ Edit category') + '</button>' : '') +
     '<button class="btn btn-primary grow" data-x="acts">See transactions →</button></div>';
@@ -2450,6 +2584,7 @@ function renderCategoryModal(c, catId, close){
     else openSubEditor(editTarget.sub, after);
   };
   q('[data-x=acts]').onclick = () => { if (close) close(); ACT.cat = catId; ACT.acct = null; actSetMonth(null); showTab('activity'); };
+  { const gl = q('[data-x=giftlist]'); if (gl) gl.onclick = () => openGiftList(); }
   // A month row drops down an inline summary of the transactions that hit this
   // category that month (latest first). Tapping again collapses it.
   const idset = new Set(ids);
