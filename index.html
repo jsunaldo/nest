@@ -254,7 +254,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v4.5'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v4.6'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -988,6 +988,12 @@ function detectRecurring(){
     (groups[key] = groups[key] || { key, label, cat: t.cat, txns: [] }).txns.push(t);
   }
   const ov = recurNameMap();
+  // Distinct calendar months (of the year) the data covers, capped at 12. A bill
+  // is only "off" in a month if we've actually observed that month be $0 for it,
+  // so with <1yr of history we don't wrongly annualize a year-round bill down.
+  const obsCal = new Set();
+  for (const t of liveTxns()){ if (t.date) obsCal.add(+t.date.slice(5, 7)); }
+  const numObs = Math.min(12, obsCal.size) || 1;
   const out = [];
   for (const key in groups){
     const g = groups[key];
@@ -1013,13 +1019,31 @@ function detectRecurring(){
       : cadence === 'semiannual' ? Math.round(perCharge / 6)
       : cadence === 'yearly' ? Math.round(perCharge / 12)
       : perCharge; // monthly / irregular → the per-charge amount
+    // Calendar-month profile: the typical $ in each month-of-year that ever bills.
+    // Summing those 12 gives a fair ANNUAL cost, so a seasonal bill (lawn only
+    // May–Sep) annualizes to its real yearly weight instead of counting as if it
+    // hit every month. calAmt[m] feeds the month-by-month budget breakdown.
+    const calAmt = {}, calCnt = {}, activeCal = [];
+    for (const m of months){ const cm = +m.slice(5, 7); calAmt[cm] = (calAmt[cm] || 0) + byMonth[m]; calCnt[cm] = (calCnt[cm] || 0) + 1; }
+    let observedTotal = 0;
+    for (let cm = 1; cm <= 12; cm++){ if (calCnt[cm]){ calAmt[cm] = Math.round(calAmt[cm] / calCnt[cm]); observedTotal += calAmt[cm]; activeCal.push(cm); } }
+    // "Truly seasonal" = we've observed ≥2 calendar months where this bill was $0
+    // (not merely months we have no data for). Quarterly/yearly cadences already
+    // read cleanly, so only monthly/irregular bills get the seasonal treatment.
+    const offMonths = numObs - activeCal.length;
+    const trulySeasonal = offMonths >= 2 && (cadence === 'monthly' || cadence === 'irregular');
+    // Annualized /mo: seasonal bills spread their yearly cost over 12; everything
+    // else keeps its cadence-based per-month equivalent (safe with partial data).
+    const annualizedMonthly = trulySeasonal ? Math.round(observedTotal / 12) : monthlyEquiv;
     const kind = g.cat ? catKind(g.cat) : 'expense';
     out.push({ key, label: ov[key] || g.label, autoLabel: g.label, edited: !!ov[key],
-               cat: g.cat, kind, stable, seasonal, cadence, monthsActive: months.length, span,
-               monthly: med, perCharge, monthlyEquiv, min: minM, max: maxM, total,
+               cat: g.cat, kind, stable, seasonal, trulySeasonal, cadence, monthsActive: months.length, span,
+               monthly: med, perActiveMonth: med, perCharge, monthlyEquiv,
+               calAmt, activeCal, observedTotal, annualizedMonthly,
+               min: minM, max: maxM, total,
                yearlyMonthly: Math.round(total / span), last: months[months.length - 1] });
   }
-  return out.sort((a, b) => b.monthlyEquiv - a.monthlyEquiv);
+  return out.sort((a, b) => b.annualizedMonthly - a.annualizedMonthly);
 }
 // Category suggestions for the review queue: same-merchant history first, then most-used.
 function suggestCats(m){
@@ -2047,9 +2071,9 @@ function renderHome(){
   const rec = detectRecurring();
   const recBills = rec.filter((r) => r.kind === 'expense'); // transfers shown in Recurring screen, not the load
   if (recBills.length){
-    const rt = recBills.reduce((s, r) => s + r.monthlyEquiv, 0); // per-month equivalents, additive
+    const rt = recBills.reduce((s, r) => s + r.annualizedMonthly, 0); // annualized /mo, additive
     html += '<div class="card" data-x="recur" style="cursor:pointer"><div class="row"><span style="font-size:18px">🔁</span>' +
-      '<div class="grow muted">Recurring load: <b style="color:var(--text)">' + fmt$(rt) + '/mo</b> across ' + recBills.length + ' repeat bills</div>' +
+      '<div class="grow muted">Recurring load: <b style="color:var(--text)">' + fmt$(rt) + '/mo</b> avg across ' + recBills.length + ' repeat bills</div>' +
       '<span class="menu-chev">›</span></div></div>';
   }
   html += '<button class="btn btn-primary btn-block" data-x="import" style="margin-bottom:16px">📥 Import statements</button>';
@@ -2976,16 +3000,29 @@ function renderBudgetsScreen(c){
 /* ---- §Recurring (main tab) ---- */
 function renderRecurring(){ renderRecurringScreen($('#view-recurring')); }
 const RECUR_OPEN = new Set(); // collapsible recurring tree: 'g:<gid>', 'sub:<gid>|<sub>', 'cat:<cid>'
-// Honest cadence/pattern label for a recurring item's subtitle.
+// Which months of the year an item bills in, as a compact label. '' if every month.
+const RECUR_MONTHS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function seasonMonthsLabel(cal){
+  if (!cal || !cal.length || cal.length >= 12) return '';
+  const sorted = cal.slice().sort((a, b) => a - b);
+  const contiguous = sorted.every((m, i) => i === 0 || m === sorted[i - 1] + 1);
+  if (contiguous && sorted.length > 1) return RECUR_MONTHS[sorted[0]] + '–' + RECUR_MONTHS[sorted[sorted.length - 1]];
+  if (sorted.length <= 4) return sorted.map((m) => RECUR_MONTHS[m]).join(', ');
+  return sorted.length + ' months a year';
+}
+// Honest cadence/pattern label for a recurring item's subtitle. Seasonal items
+// name their active months + the per-active-month amount, so the annualized /mo
+// figure on the right never reads as "this happens every month."
 function recurCadenceLabel(r){
   let base;
+  const sl = seasonMonthsLabel(r.activeCal);
   if (r.cadence === 'quarterly') base = 'quarterly · ~' + fmt$(r.perCharge) + '/qtr';
   else if (r.cadence === 'semiannual') base = 'twice a year · ~' + fmt$(r.perCharge);
   else if (r.cadence === 'yearly') base = 'yearly · ~' + fmt$(r.perCharge) + '/yr';
-  else if (r.seasonal) base = 'seasonal · ' + r.monthsActive + ' of ' + r.span + ' mo';
+  else if (r.trulySeasonal) base = '🗓 ' + (sl || (r.monthsActive + ' of ' + r.span + ' mo')) + ' · ' + fmt$(r.perActiveMonth) + '/mo when active';
   else if (r.cadence === 'irregular') base = 'every ~' + Math.max(2, Math.round(r.span / r.monthsActive)) + ' mo';
   else base = 'monthly';
-  if (r.min !== r.max) base += ' · ' + fmt$(r.min) + '–' + fmt$(r.max);
+  if (!r.trulySeasonal && r.cadence === 'monthly' && r.min !== r.max) base += ' · ' + fmt$(r.min) + '–' + fmt$(r.max);
   return base;
 }
 function renderRecurringScreen(c){
@@ -2998,8 +3035,8 @@ function renderRecurringScreen(c){
   const transfers = rec.filter((r) => r.kind === 'transfer');
   const byCat = {};
   for (const r of expenses){ (byCat[r.cat] = byCat[r.cat] || []).push(r); }
-  const catTotal = (cid) => (byCat[cid] || []).reduce((s, r) => s + r.monthlyEquiv, 0);
-  const grandTotal = expenses.reduce((s, r) => s + r.monthlyEquiv, 0);
+  const catTotal = (cid) => (byCat[cid] || []).reduce((s, r) => s + r.annualizedMonthly, 0);
+  const grandTotal = expenses.reduce((s, r) => s + r.annualizedMonthly, 0);
 
   // A tree row. tog → collapsible (data-rtog); else a leaf.
   const trow = (icon, name, sub, amtStr, lvl, tog, open) =>
@@ -3015,14 +3052,44 @@ function renderRecurringScreen(c){
     if (items.length === 1) return trow(cl.icon, cl.name, recurCadenceLabel(items[0]), amt, lvl, null, false);
     const key = 'cat:' + cid, open = RECUR_OPEN.has(key);
     let h = trow(cl.icon, cl.name, items.length + ' bills', amt, lvl, key, open);
-    if (open) for (const r of items.slice().sort((a, b) => b.monthlyEquiv - a.monthlyEquiv))
-      h += trow('•', r.label, recurCadenceLabel(r), fmt$(r.monthlyEquiv) + '/mo', deeper, null, false);
+    if (open) for (const r of items.slice().sort((a, b) => b.annualizedMonthly - a.annualizedMonthly))
+      h += trow('•', r.label, recurCadenceLabel(r), fmt$(r.annualizedMonthly) + '/mo', deeper, null, false);
     return h;
   };
 
-  let html = '<div class="stat" style="margin-bottom:12px"><div class="v">' + fmt$(grandTotal) + '/mo</div>' +
-    '<div class="l">recurring bills</div></div>' +
-    '<p class="tiny" style="margin:0 0 8px">High-level first — tap a group or subcategory to drill down. All amounts are per-month equivalents so they add up.</p>' +
+  // Month-by-month expected recurring spend for budgeting. Seasonal bills land
+  // only in the months they actually occur; year-round bills spread evenly, so
+  // the variation you see across months IS the seasonal load. Sums to 12× the
+  // annualized total, so the headline and the breakdown always agree.
+  const mbm = {};
+  for (let cm = 1; cm <= 12; cm++) mbm[cm] = 0;
+  for (const r of expenses){
+    if (r.trulySeasonal){ for (let cm = 1; cm <= 12; cm++) if (r.calAmt[cm]) mbm[cm] += r.calAmt[cm]; }
+    else for (let cm = 1; cm <= 12; cm++) mbm[cm] += r.annualizedMonthly;
+  }
+  const mbmMax = Math.max.apply(null, Object.keys(mbm).map((k) => mbm[k]).concat([1]));
+  const nowCm = new Date().getMonth() + 1;
+  const mbmOpen = RECUR_OPEN.has('mbm');
+
+  let html = '<div class="card">' +
+    '<div class="tree-row grp" data-rtog="mbm" style="cursor:pointer"><span class="ic">📅</span>' +
+    '<div class="body"><div class="t1">Annualized average recurring</div>' +
+    '<div class="t2">seasonal bills spread across the year · tap for month-by-month</div></div>' +
+    '<span class="amt">' + fmt$(grandTotal) + '/mo</span><span class="chev">' + (mbmOpen ? '▾' : '▸') + '</span></div>';
+  if (mbmOpen){
+    html += '<div style="padding:6px 12px 12px">';
+    for (let cm = 1; cm <= 12; cm++){
+      const v = Math.round(mbm[cm]), w = Math.max(v > 0 ? 3 : 0, Math.round(100 * mbm[cm] / mbmMax)), cur = cm === nowCm;
+      html += '<div style="display:flex;align-items:center;gap:9px;margin:6px 0">' +
+        '<span style="width:30px;font-size:12px;font-weight:' + (cur ? '700' : '400') + ';color:' + (cur ? 'var(--accent)' : 'var(--dim)') + '">' + RECUR_MONTHS[cm] + '</span>' +
+        '<div style="flex:1;height:8px;background:var(--line);border-radius:4px;overflow:hidden"><div style="height:100%;width:' + w + '%;background:' + (cur ? 'var(--accent)' : 'var(--viz-1)') + ';border-radius:4px"></div></div>' +
+        '<span style="width:66px;text-align:right;font-size:12px;font-variant-numeric:tabular-nums;color:var(--text)">' + fmt$(v) + '</span></div>';
+    }
+    html += '<p class="tiny" style="margin:6px 0 0">Expected recurring spend per calendar month — use these to set each month’s budget. The $/mo above is the yearly total averaged over 12.</p></div>';
+  }
+  html += '</div>';
+
+  html += '<p class="tiny" style="margin:0 0 8px">Tap a group or subcategory to drill down. Row amounts are annualized (yearly cost ÷ 12) so seasonal bills add up honestly.</p>' +
     '<div class="card">';
   for (const g of GROUPS){
     if (g.kind === 'income' || g.kind === 'system') continue;
@@ -3051,12 +3118,12 @@ function renderRecurringScreen(c){
   html += '</div>';
 
   if (transfers.length){
-    const tt = transfers.reduce((s, r) => s + r.monthlyEquiv, 0);
+    const tt = transfers.reduce((s, r) => s + r.annualizedMonthly, 0);
     html += '<div class="card"><h3>Recurring transfers · ' + fmt$(tt) + '/mo</h3>' +
       '<p class="tiny" style="margin:0 0 6px">Card payments &amp; the like — repeat monthly but aren’t spending. Not in the total above.</p>' +
       transfers.map((r) => '<div class="list-item" style="cursor:default"><span class="ic">' + catLabel(r.cat).icon + '</span>' +
         '<div class="body"><div class="t1">' + esc(r.label) + '</div><div class="t2">' + recurCadenceLabel(r) + '</div></div>' +
-        '<span class="amt">' + fmt$(r.monthlyEquiv) + '/mo</span></div>').join('') + '</div>';
+        '<span class="amt">' + fmt$(r.annualizedMonthly) + '/mo</span></div>').join('') + '</div>';
   }
 
   c.innerHTML = html;
