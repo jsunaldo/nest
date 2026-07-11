@@ -298,7 +298,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v7.3'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v7.4'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -2171,6 +2171,23 @@ function groupedCatHTML(spendMap, incomeMap, investMap, opts){
     }
   }
   if (spendMap.__uncat > 0) html += catLeaf('__uncat', '−' + fmt$(spendMap.__uncat), 'var(--status-warn)', 'grp');
+  // Safety net: money whose category the loop above couldn't place — a category whose
+  // Type doesn't match its group (e.g. income filed under a spending group), or money
+  // that flowed the "wrong way" for its category (money-IN to a spending category, or
+  // money-OUT from an income one). Without this it would silently vanish. net = cash
+  // direction (+ in / − out); tap a row to open that category and recategorize.
+  const placed = new Set();
+  for (const g of GROUPS){ if (g.kind === 'system') continue; const src = g.kind === 'income' ? (incomeMap || {}) : spendMap;
+    for (const c in src) if (src[c] > 0 && DATA.cats[c] && DATA.cats[c].group === g.id) placed.add(c); }
+  const orphans = [];
+  for (const c in (incomeMap || {})) if (c !== '__uncat' && incomeMap[c] !== 0 && !placed.has(c)) orphans.push({ cid: c, net: incomeMap[c] });
+  for (const c in (spendMap || {})) if (c !== '__uncat' && spendMap[c] !== 0 && !placed.has(c)) orphans.push({ cid: c, net: -spendMap[c] });
+  if (orphans.length){
+    const gkey = pfx + ':g:mismatch', gOpen = BREAKDOWN_OPEN.has(gkey);
+    const tot = orphans.reduce((s, o) => s + o.net, 0);
+    html += grpRow(null, '⚠️', 'Filed under the wrong type', fmt$(tot, { signed: true }), 'var(--status-warn)', gkey, gOpen);
+    if (gOpen) for (const o of orphans.sort((a, b) => Math.abs(b.net) - Math.abs(a.net))) html += catLeaf(o.cid, fmt$(o.net, { signed: true }), 'var(--status-warn)', 'tree-l1');
+  }
   const inv = Object.keys(investMap || {}).filter((c) => investMap[c] !== 0).sort((a, b) => Math.abs(investMap[b]) - Math.abs(investMap[a]));
   if (inv.length){
     const t = inv.reduce((s, c) => s + investMap[c], 0);
