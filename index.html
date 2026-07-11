@@ -259,7 +259,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v5.8'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v5.9'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -2257,14 +2257,6 @@ function renderHome(){
     '<span class="menu-chev">›</span></div>').join('') +
     '<p class="tiny" style="margin:8px 0 0">Tap a month for its full breakdown — budgets, categories, gifts, alcohol, groceries…</p></div>';
 
-  const recCats = recurringCatData(); // same category-based total the Recurring tab shows
-  const recIds = Object.keys(recCats);
-  if (recIds.length){
-    const rt = recIds.reduce((s, cid) => s + recCats[cid].annualizedMonthly, 0); // annualized /mo, additive
-    html += '<div class="card" data-x="recur" style="cursor:pointer"><div class="row"><span style="font-size:18px">🔁</span>' +
-      '<div class="grow muted">Recurring load: <b style="color:var(--text)">' + fmt$(rt) + '/mo</b> avg across ' + recIds.length + ' categor' + (recIds.length === 1 ? 'y' : 'ies') + '</div>' +
-      '<span class="menu-chev">›</span></div></div>';
-  }
   html += '<button class="btn btn-primary btn-block" data-x="import" style="margin-bottom:16px">📥 Import statements</button>';
   c.innerHTML = html;
 
@@ -2273,16 +2265,12 @@ function renderHome(){
   c.querySelector('[data-x=ysel]').onchange = (e) => { YEAR_LENS = e.target.value; renderHome(); };
   const on = (sel, fn) => { const n2 = c.querySelector(sel); if (n2) n2.onclick = fn; };
   on('[data-x=rev]', () => showTab('review'));
-  on('[data-x=recur]', () => showTab('recurring'));
   on('[data-x=import]', () => openScreen('Import', renderImportScreen));
   on('[data-x=bal]', () => openScreen('Accounts', renderAccountsScreen));
   c.querySelectorAll('[data-aidhome]').forEach((n2) => { n2.onclick = () => openAccountModal(n2.dataset.aidhome); });
   c.querySelectorAll('[data-bl]').forEach((b) => { b.onclick = () => { HOME_BL = b.dataset.bl; renderHome(); }; });
   c.querySelectorAll('[data-cat]').forEach((n2) => {
-    n2.onclick = () => {
-      if (n2.dataset.cat === '__uncat'){ showTab('review'); return; }
-      ACT.cat = n2.dataset.cat; actSetMonth(null); showTab('activity');
-    };
+    n2.onclick = () => openCategoryModal(n2.dataset.cat);
   });
   c.querySelectorAll('[data-btog]').forEach((r) => {
     r.onclick = () => { const k = r.dataset.btog; if (BREAKDOWN_OPEN.has(k)) BREAKDOWN_OPEN.delete(k); else BREAKDOWN_OPEN.add(k); renderHome(); };
@@ -2303,6 +2291,111 @@ function openMonthModal(ym){
   UI.month = ym;
   const m = modal('', '<div data-x="mbody"></div>');
   renderMonthScreen(m.node.querySelector('[data-x=mbody]'), m.close);
+}
+// Monthly bars for one category with a dashed budget line. Over-budget months are
+// red, under are green. months = Jan–Dec (a partial year still shows the whole axis).
+function catBarChartHTML(months, vals, budget, curYM){
+  const n = months.length;
+  const padT = 16, padB = 22, padL = 6, padR = 6;
+  const W = Math.max(340, n * 34), H = 170;
+  let maxV = Math.max(1, budget);
+  for (const v of vals) maxV = Math.max(maxV, v);
+  const colW = (W - padL - padR) / n, barW = Math.max(5, Math.min(22, colW - 8)), baseY = H - padB;
+  const yS = (v) => padT + (1 - v / maxV) * (H - padT - padB);
+  let s = '';
+  for (let gi = 1; gi <= 3; gi++){ const gy = yS(maxV * gi / 4).toFixed(1); s += '<line x1="' + padL + '" y1="' + gy + '" x2="' + (W - padR) + '" y2="' + gy + '" stroke="var(--line)"/>'; }
+  months.forEach((ym, i) => {
+    const cx = padL + i * colW + colW / 2, v = vals[i], over = budget > 0 && v > budget;
+    const color = over ? 'var(--status-crit)' : 'var(--viz-2)';
+    const tip = fmtMonth(ym) + ' · <b>' + fmt$(v) + '</b>' + (budget > 0 ? (over ? ' · <span style="color:var(--status-crit)">' + fmt$(v - budget) + ' over</span>' : ' · ' + fmt$(budget - v) + ' under') : '');
+    s += '<rect data-tip="' + esc(tip) + '" x="' + (padL + i * colW).toFixed(1) + '" y="0" width="' + colW.toFixed(1) + '" height="' + H + '" fill="transparent" pointer-events="all"/>';
+    if (v > 0) s += barPath(cx - barW / 2, yS(v), barW, baseY - yS(v), color, over ? 0.95 : 0.72, ' pointer-events="none"');
+    if (n <= 12 || i % 2 === 0) s += '<text x="' + cx.toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle" font-size="10" fill="' + (ym === curYM ? 'var(--accent)' : 'var(--faint)') + '" pointer-events="none">' + fmtMonth(ym).slice(0, 3) + '</text>';
+  });
+  if (budget > 0){ const by = yS(budget); s += '<line x1="' + padL + '" y1="' + by.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + by.toFixed(1) + '" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="5 3"/>' +
+    '<text x="' + (W - padR) + '" y="' + (by - 4).toFixed(1) + '" text-anchor="end" font-size="9" fill="var(--accent)">budget ' + fmt$(budget) + '</text>'; }
+  return '<div class="chart-wrap"><svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" xmlns="http://www.w3.org/2000/svg">' + s + '</svg></div>';
+}
+// Popup for one category (from the Home "by category" breakdown). Income → an
+// over-time line; expense → monthly spend bars vs the budget so you see over/under.
+function openCategoryModal(catId){
+  if (!catId || catId === '__uncat'){ showTab('review'); return; }
+  const m = modal('', '<div data-x="cbody"></div>', () => renderCurrent());
+  renderCategoryModal(m.node.querySelector('[data-x=cbody]'), catId, m.close);
+}
+function renderCategoryModal(c, catId, close){
+  const cat = DATA.cats[catId];
+  if (!cat){ if (close) close(); return; }
+  const kind = cat.kind || 'expense';
+  const agg = buildMonthAgg();
+  const years = dataYearList(), yearSeq = ['all'].concat(years);
+  const yi = yearSeq.indexOf(YEAR_LENS) < 0 ? 0 : yearSeq.indexOf(YEAR_LENS);
+  const st = yearStats(agg, YEAR_LENS);
+  const months = st.months, cur = currentYM();
+  const mapKey = kind === 'income' ? 'income' : kind === 'invest' ? 'invest' : 'spend';
+  const monthVal = (ym) => { const a = agg[ym]; return a && a[mapKey] ? (a[mapKey][catId] || 0) : 0; };
+  const firstData = Object.keys(agg).sort()[0] || cur;
+  const vals = months.map(monthVal);
+  const total = vals.reduce((s, v) => s + v, 0);
+  const fullVals = st.fullMonths.map(monthVal);
+  const avgMo = st.fullMonths.length ? Math.round(fullVals.reduce((s, v) => s + v, 0) / st.fullMonths.length) : 0;
+  const cl = catLabel(catId);
+
+  let html = '<div class="modal-closebar"><button class="btn btn-sm" data-x="mclose">✕ Close</button>' +
+    '<b>' + esc(cl.icon) + ' ' + esc(cl.name) + '</b><div style="width:64px"></div></div>';
+  html += '<div class="month-nav"><button data-x="yprev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button>' +
+    '<select data-x="ysel" class="ynav-sel">' + yearSeq.map((y) => '<option value="' + y + '"' + (y === YEAR_LENS ? ' selected' : '') + '>' + esc(yearLabel(y)) + '</option>').join('') + '</select>' +
+    '<button data-x="ynext"' + (yi >= yearSeq.length - 1 ? ' disabled' : '') + '>›</button></div>';
+
+  if (kind === 'expense'){
+    const baseline = baselineByCat(agg);
+    const bf = budgetFor(catId, baseline);
+    const budget = bf ? bf.amt : 0;
+    const overMonths = st.fullMonths.filter((ym) => budget > 0 && monthVal(ym) > budget).length;
+    html += '<div class="card"><div class="bl-row">' +
+      '<div class="bl-tile"><div class="bl-v">' + fmt$(total) + '</div><div class="bl-l">Spent</div></div>' +
+      '<div class="bl-tile"><div class="bl-v">' + fmt$(avgMo) + '</div><div class="bl-l">Avg / mo</div></div>' +
+      '<div class="bl-tile"><div class="bl-v"' + (budget ? '' : ' style="color:var(--faint)"') + '>' + (budget ? fmt$(budget) : '—') + '</div><div class="bl-l">Budget / mo</div></div></div>' +
+      (budget ? '<p class="tiny" style="margin:9px 0 0;text-align:center">' + (overMonths ? '<span style="color:var(--status-crit)">Over budget in ' + overMonths + ' of ' + st.fullMonths.length + ' months</span>' : '<span style="color:var(--status-good)">Under budget every month 👏</span>') + '</p>'
+              : '<p class="tiny" style="margin:9px 0 0;text-align:center;color:var(--faint)">No budget set — add one in Budgets to see over/under.</p>') +
+      '</div>';
+    html += '<div class="card"><h3>Spend by month' + (YEAR_LENS !== 'all' ? ' · ' + esc(YEAR_LENS) : '') + '</h3>' + catBarChartHTML(months, vals, budget, cur) +
+      '<div class="legend"><span><i style="background:var(--viz-2)"></i>Under budget</span><span><i style="background:var(--status-crit)"></i>Over budget</span><span><i style="background:var(--accent)"></i>Budget</span></div></div>';
+  } else {
+    // Income / investment: value over time (each month's amount, with a trendline).
+    const pts = months.map((ym) => ({ ym, bal: (ym >= firstData && ym <= cur) ? monthVal(ym) : null }));
+    html += '<div class="card"><div class="bl-row">' +
+      '<div class="bl-tile"><div class="bl-v amt-pos">' + fmt$(total) + '</div><div class="bl-l">' + (kind === 'invest' ? 'Invested' : 'Received') + '</div></div>' +
+      '<div class="bl-tile"><div class="bl-v">' + fmt$(avgMo) + '</div><div class="bl-l">Avg / mo</div></div></div></div>';
+    const chart = balanceChartHTML(pts);
+    if (chart) html += '<div class="card"><h3>' + (kind === 'invest' ? 'Invested' : 'Income') + ' by month' + (YEAR_LENS !== 'all' ? ' · ' + esc(YEAR_LENS) : '') + '</h3>' + chart +
+      '<div class="legend"><span><i style="background:var(--viz-2)"></i>' + (kind === 'invest' ? 'Invested' : 'Income') + '/mo</span><span><i style="background:var(--accent)"></i>Trend</span></div></div>';
+  }
+
+  // Month by month list (latest first), over/under flag for expenses.
+  const rows = st.perMonth.filter((mm) => agg[mm.ym]).slice().reverse();
+  if (rows.length){
+    const budget2 = kind === 'expense' ? (() => { const bf = budgetFor(catId, baselineByCat(agg)); return bf ? bf.amt : 0; })() : 0;
+    html += '<div class="card"><h3>Month by month</h3>' + rows.map((mm) => {
+      const v = monthVal(mm.ym), over = budget2 > 0 && v > budget2 && mm.ym < cur;
+      return '<div class="list-item" style="cursor:default"><div class="body"><div class="t1">' + fmtMonth(mm.ym) + '</div>' +
+        (budget2 > 0 && mm.ym < cur ? '<div class="t2" style="color:' + (over ? 'var(--status-crit)' : 'var(--status-good)') + '">' + (over ? fmt$(v - budget2) + ' over' : fmt$(budget2 - v) + ' under') + '</div>' : '') + '</div>' +
+        '<span class="amt"' + (kind === 'income' ? ' style="color:var(--status-good)"' : '') + '>' + fmt$(v) + '</span></div>';
+    }).join('') + '</div>';
+  }
+
+  html += '<div class="row" style="margin-bottom:16px"><button class="btn grow" data-x="edit">⚙️ Edit category</button>' +
+    '<button class="btn btn-primary grow" data-x="acts">See transactions →</button></div>';
+  c.innerHTML = html;
+
+  const q = (s) => c.querySelector(s);
+  q('[data-x=mclose]').onclick = () => close && close();
+  q('[data-x=yprev]').onclick = () => { YEAR_LENS = yearSeq[yi - 1]; renderCategoryModal(c, catId, close); };
+  q('[data-x=ynext]').onclick = () => { YEAR_LENS = yearSeq[yi + 1]; renderCategoryModal(c, catId, close); };
+  q('[data-x=ysel]').onchange = (e) => { YEAR_LENS = e.target.value; renderCategoryModal(c, catId, close); };
+  q('[data-x=edit]').onclick = () => openCatEditor(catId, () => { if (DATA.cats[catId]) renderCategoryModal(c, catId, close); else if (close) close(); });
+  q('[data-x=acts]').onclick = () => { if (close) close(); ACT.cat = catId; ACT.acct = null; actSetMonth(null); showTab('activity'); };
+  bindChartTips(c);
 }
 // A scrollable popup of the Home overview, scoped to one account.
 function openAccountModal(acctId){
@@ -3066,58 +3159,7 @@ function yearChartsHTML(agg, months, sel, baseline){
       '<span><i style="background:var(--viz-2);opacity:.5"></i>One-off income</span></div>' +
     '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Hover a bar segment for detail · tap a bar to open that month.</span></div></div>';
 
-  /* -- card 2: where it goes, top-4 category lines + Other -- */
-  const totals = {};
-  for (const ym of months) for (const cid in agg[ym].spend) totals[cid] = (totals[cid] || 0) + agg[ym].spend[cid];
-  const ranked = Object.keys(totals).filter((k) => totals[k] > 0).sort((a, b) => totals[b] - totals[a]);
-  const topIds = ranked.slice(0, 4);
-  const series = topIds.map((cid, k) => ({
-    name: cid === '__uncat' ? 'Uncategorized' : catLabel(cid).name,
-    color: 'var(--viz-' + (k + 1) + ')',
-    vals: months.map((ym) => agg[ym].spend[cid] || 0),
-  }));
-  if (ranked.length > 4) series.push({
-    name: 'Other', color: 'var(--viz-other)',
-    vals: months.map((ym) => ranked.slice(4).reduce((s, cid) => s + (agg[ym].spend[cid] || 0), 0)),
-  });
-  let card2 = '';
-  if (series.length){
-    const GUT = 84;
-    const W2 = Math.max(340, n * 40) + GUT, H2 = 180;
-    const plotR = W2 - GUT;
-    const colW2 = (plotR - padL) / n;
-    let sMax = 1;
-    for (const se of series) for (const v of se.vals) sMax = Math.max(sMax, v);
-    const yL = (v) => padT + (1 - v / sMax) * (H2 - padT - padB);
-    const xL = (i) => padL + i * colW2 + colW2 / 2;
-    let s2 = '';
-    for (let gi = 1; gi <= 3; gi++){
-      const gy = yL(sMax * gi / 4).toFixed(1);
-      s2 += '<line x1="' + padL + '" y1="' + gy + '" x2="' + plotR + '" y2="' + gy + '" stroke="var(--line)"/>';
-    }
-    for (const se of series){
-      s2 += '<polyline points="' + se.vals.map((v, i) => xL(i).toFixed(1) + ',' + yL(v).toFixed(1)).join(' ') +
-        '" fill="none" stroke="' + se.color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
-      s2 += '<circle cx="' + xL(si).toFixed(1) + '" cy="' + yL(se.vals[si]).toFixed(1) + '" r="4" fill="' + se.color + '" stroke="var(--card)" stroke-width="2"/>';
-    }
-    const labels = series.map((se) => ({ name: se.name, color: se.color, y: yL(se.vals[n - 1]) }))
-      .sort((a, b) => a.y - b.y);
-    for (let i = 1; i < labels.length; i++) if (labels[i].y < labels[i - 1].y + 11) labels[i].y = labels[i - 1].y + 11;
-    for (const lb of labels)
-      s2 += '<circle cx="' + (plotR + 7) + '" cy="' + (lb.y - 3).toFixed(1) + '" r="3" fill="' + lb.color + '"/>' +
-        '<text x="' + (plotR + 14) + '" y="' + lb.y.toFixed(1) + '" font-size="10" fill="var(--dim)">' + esc(lb.name.slice(0, 12)) + '</text>';
-    months.forEach((ym, i) => {
-      if (n <= 8 || i % 2 === 0 || ym === sel)
-        s2 += '<text x="' + xL(i).toFixed(1) + '" y="' + (H2 - 6) + '" text-anchor="middle" font-size="10" fill="var(--faint)" pointer-events="none">' + fmtMonth(ym).slice(0, 3) + '</text>';
-      const tip = '<b>' + fmtMonth(ym) + '</b><br>' + series.map((se) => esc(se.name) + ' ' + fmt$(se.vals[i])).join('<br>');
-      s2 += '<rect data-m="' + ym + '" data-tip="' + esc(tip) + '" x="' + (padL + i * colW2).toFixed(1) + '" y="0" width="' + colW2.toFixed(1) + '" height="' + H2 + '" fill="transparent" pointer-events="all" style="cursor:pointer"/>';
-    });
-    card2 = '<div class="card"><h3>Where it goes</h3>' +
-      '<div class="chart-wrap"><svg viewBox="0 0 ' + W2 + ' ' + H2 + '" width="100%" xmlns="http://www.w3.org/2000/svg">' + s2 + '</svg></div>' +
-      '<div class="legend">' + series.map((se) => '<span><i style="background:' + se.color + '"></i>' + esc(se.name) + '</span>').join('') + '</div>' +
-      '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Hover a month for its category values.</span></div></div>';
-  }
-  return card1 + card2;
+  return card1;
 }
 
 // "Month vs your baseline" table, used on the Monthly-detail screen.
