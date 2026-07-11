@@ -229,10 +229,15 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 .tree-row .body .t1{font-weight:600; font-size:14px}
 .tree-row.grp .body .t1{font-weight:700}
 .tree-row .chev{color:var(--faint); width:18px; text-align:center; flex-shrink:0; font-size:12px}
-/* interactive expand/collapse control — a clear tappable button, not a tiny caret */
-.tree-row .chev.tog{color:var(--dim); width:30px; height:30px; font-size:15px; display:flex; align-items:center;
-  justify-content:center; border-radius:8px; background:var(--card2); border:1px solid var(--line); margin-left:2px; cursor:pointer}
-.tree-row .chev.tog:active{background:var(--line); color:var(--text)}
+/* interactive expand/collapse control — a clear tappable button, not a tiny caret.
+   Parent-agnostic so it works in tree rows AND list-item month rows. */
+.chev.tog{color:var(--dim); width:30px; height:30px; font-size:15px; display:inline-flex; align-items:center;
+  justify-content:center; border-radius:8px; background:var(--card2); border:1px solid var(--line); margin-left:2px; cursor:pointer; flex-shrink:0}
+.chev.tog:active{background:var(--line); color:var(--text)}
+/* inline transaction dropdown under a category-popup month row */
+.cmonth-detail{background:var(--card2); border-radius:10px; margin:0 0 6px; padding:2px 8px}
+.cmonth-detail .list-item{cursor:default}
+.cmonth-detail .list-item:last-child{border-bottom:none}
 .tree-act{color:var(--accent); font-size:17px; padding:2px 6px; flex-shrink:0; cursor:pointer}
 .tree-l1{margin-left:6px; border-left:2px solid var(--line); padding-left:12px}
 .tree-l2{margin-left:14px; border-left:2px solid var(--line); padding-left:16px}
@@ -279,7 +284,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v6.7'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v6.8'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -2265,7 +2270,7 @@ function renderHome(){
   html += '<div class="card"><h3>Month by month</h3>' + st.perMonth.slice().reverse().map((m) =>
     '<div class="list-item" data-ym="' + m.ym + '"><div class="body"><div class="t1">' + fmtMonth(m.ym) + '</div>' +
     '<div class="t2">out ' + fmt$(m.spend) + ' · in ' + fmt$(m.income) + '</div></div>' +
-    '<span class="amt" style="color:' + (m.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(m.net, { signed: true }) + '</span>' +
+    '<span class="amt" style="color:' + (m.net > 0 ? 'var(--status-good)' : m.net < 0 ? 'var(--status-crit)' : 'var(--dim)') + '">' + fmt$(m.net, { signed: true }) + '</span>' +
     '<span class="menu-chev">›</span></div>').join('') +
     '<p class="tiny" style="margin:8px 0 0">Tap a month for its full breakdown — budgets, categories, gifts, alcohol, groceries…</p></div>';
 
@@ -2399,14 +2404,17 @@ function renderCategoryModal(c, catId, close){
       '<div class="legend"><span><i style="background:var(--viz-2)"></i>' + (kind === 'invest' ? 'Invested' : 'Income') + '/mo</span><span><i style="background:var(--blue)"></i>Average</span><span><i style="background:var(--accent)"></i>Trend</span></div></div>';
   }
 
-  // Month by month list (latest first), over/under vs budget for expenses.
+  // Month by month list (latest first), over/under vs budget for expenses. Each row
+  // expands inline to the transactions that hit this category that month. A $0 month
+  // is greyed (not green) so real activity stands out.
   const rows = st.perMonth.filter((mm) => agg[mm.ym]).slice().reverse();
   if (rows.length){
-    html += '<div class="card"><h3>Month by month</h3>' + rows.map((mm) => {
+    html += '<div class="card"><h3>Month by month</h3><p class="tiny" style="margin:0 0 6px">Tap a month to see its transactions.</p>' + rows.map((mm) => {
       const v = monthVal(mm.ym), over = budget > 0 && v > budget && mm.ym < cur;
-      return '<div class="list-item" style="cursor:default"><div class="body"><div class="t1">' + fmtMonth(mm.ym) + '</div>' +
+      const amtColor = v === 0 ? 'var(--dim)' : (kind === 'income' ? 'var(--status-good)' : 'var(--text)');
+      return '<div class="list-item" data-cmonth="' + mm.ym + '" style="cursor:pointer"><div class="body"><div class="t1">' + fmtMonth(mm.ym) + '</div>' +
         (budget > 0 && mm.ym < cur ? '<div class="t2" style="color:' + (over ? 'var(--status-crit)' : 'var(--status-good)') + '">' + (over ? fmt$(v - budget) + ' over' : fmt$(budget - v) + ' under') + '</div>' : '') + '</div>' +
-        '<span class="amt"' + (kind === 'income' ? ' style="color:var(--status-good)"' : '') + '>' + fmt$(v) + '</span></div>';
+        '<span class="amt" style="color:' + amtColor + '">' + fmt$(v) + '</span><span class="chev tog">▸</span></div>';
     }).join('') + '</div>';
   }
 
@@ -2427,6 +2435,25 @@ function renderCategoryModal(c, catId, close){
     else openSubEditor(editTarget.sub, after);
   };
   q('[data-x=acts]').onclick = () => { if (close) close(); ACT.cat = catId; ACT.acct = null; actSetMonth(null); showTab('activity'); };
+  // A month row drops down an inline summary of the transactions that hit this
+  // category that month (latest first). Tapping again collapses it.
+  const idset = new Set(ids);
+  const txnsInMonth = (ym) => liveTxns()
+    .filter((t) => t.status !== 'excluded' && ymOf(t.date) === ym && effParts(t).some((p) => idset.has(p.cat)))
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
+  c.querySelectorAll('[data-cmonth]').forEach((row) => {
+    row.onclick = () => {
+      const ym = row.dataset.cmonth, chev = row.querySelector('.chev.tog'), nxt = row.nextElementSibling;
+      if (nxt && nxt.classList.contains('cmonth-detail')){ nxt.remove(); if (chev) chev.textContent = '▸'; return; }
+      const list = txnsInMonth(ym);
+      const div = document.createElement('div');
+      div.className = 'cmonth-detail';
+      div.innerHTML = list.length ? list.map((t) => txnRowHTML(t)).join('')
+        : '<div class="list-item"><div class="body"><div class="t2">No transactions this month.</div></div></div>';
+      row.after(div);
+      if (chev) chev.textContent = '▾';
+    };
+  });
   bindChartTips(c);
 }
 // A scrollable popup of the Home overview, scoped to one account.
@@ -2562,7 +2589,7 @@ function renderAccountModal(c, acctId, close){
       html += '<div class="card"><h3>Month by month</h3>' + st.perMonth.slice().reverse().map((mm) =>
         '<div class="list-item" style="cursor:default"><div class="body"><div class="t1">' + fmtMonth(mm.ym) + '</div>' +
         '<div class="t2">out ' + fmt$(mm.spend) + ' · in ' + fmt$(mm.income) + '</div></div>' +
-        '<span class="amt" style="color:' + (mm.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(mm.net, { signed: true }) + '</span></div>').join('') + '</div>';
+        '<span class="amt" style="color:' + (mm.net > 0 ? 'var(--status-good)' : mm.net < 0 ? 'var(--status-crit)' : 'var(--dim)') + '">' + fmt$(mm.net, { signed: true }) + '</span></div>').join('') + '</div>';
   }
 
   html += '<div class="row" style="margin-bottom:16px"><button class="btn grow" data-x="edit">⚙️ Edit account</button>' +
