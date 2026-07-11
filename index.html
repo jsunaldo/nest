@@ -254,7 +254,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v4.4'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v4.5'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1365,6 +1365,37 @@ function accountBalanceAt(acct, asOf){
   }
   return bal;
 }
+// End-of-month balance for each month the account has activity. When the account
+// is anchored (a real balance is set) the points are absolute balances; otherwise
+// they're cumulative net flow from 0 (shape is right, the zero point isn't).
+function accountBalanceSeries(acct){
+  if (!acct) return { pts: [], anchored: false };
+  const monthly = {};
+  let minYM = null, maxYM = null;
+  for (const id in DATA.txns){
+    const t = DATA.txns[id];
+    if (t.deleted || t.acct !== acct.id || !t.date) continue;
+    const ym = t.date.slice(0, 7);
+    monthly[ym] = (monthly[ym] || 0) + t.amt;
+    if (!minYM || ym < minYM) minYM = ym;
+    if (!maxYM || ym > maxYM) maxYM = ym;
+  }
+  const anchored = acct.anchorBal != null && !!acct.anchorDate;
+  if (anchored){ const aym = acct.anchorDate.slice(0, 7); if (!minYM || aym < minYM) minYM = aym; }
+  if (!minYM) return { pts: [], anchored };
+  const cur = currentYM();
+  if (!maxYM || maxYM < cur) maxYM = cur;
+  const months = [];
+  for (let y = minYM; y <= maxYM; y = shiftYM(y, 1)){ months.push(y); if (months.length > 600) break; }
+  let pts;
+  if (anchored){
+    pts = months.map((ym) => ({ ym, bal: accountBalanceAt(acct, ym + '-31') }));
+  } else {
+    let run = 0;
+    pts = months.map((ym) => { run += (monthly[ym] || 0); return { ym, bal: run }; });
+  }
+  return { pts, anchored };
+}
 const ACCT_TYPES = [['checking', 'Checking'], ['savings', 'Savings'], ['investment', 'Investment'], ['btc', 'Bitcoin Investment'], ['credit', 'Credit card']];
 // --- Bitcoin: satoshis on txns (t.btc), live spot price cached ~5 min. ---
 let BTC_PRICE = null; // { usd: cents, at: ms }
@@ -2089,9 +2120,34 @@ function renderAccountModal(c, acctId, close){
       (gain != null ? ' · <b style="color:' + (gain >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(gain, { signed: true }) + '</b>' : '') + '</p></div>';
   } else {
     const bal = accountBalance(a);
-    html += '<div class="card"><div class="row"><span class="grow"><b>Current balance</b><div class="tiny">' + esc(acctTypeLabel(a.type)) + '</div></span>' +
-      (bal == null ? '<a data-x="setbal" style="cursor:pointer;color:var(--accent)">Set balance ›</a>'
-                   : '<b style="font-size:18px' + (bal < 0 ? ';color:var(--status-crit)' : '') + '">' + fmt$(bal) + '</b>') + '</div></div>';
+    const ser = accountBalanceSeries(a), pts = ser.pts;
+    if (ser.anchored && pts.length){
+      const startBal = pts[0].bal, curBal = pts[pts.length - 1].bal, delta = curBal - startBal;
+      html += '<div class="card"><div class="bl-row">' +
+        '<div class="bl-tile"><div class="bl-v">' + fmt$(startBal) + '</div><div class="bl-l">Starting</div></div>' +
+        '<div class="bl-tile"><div class="bl-v"' + (curBal < 0 ? ' style="color:var(--status-crit)"' : '') + '>' + fmt$(curBal) + '</div><div class="bl-l">Current</div></div>' +
+        '<div class="bl-tile"><div class="bl-v" style="color:' + (delta >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(delta, { signed: true }) + '</div><div class="bl-l">Change</div></div></div>' +
+        '<p class="tiny" style="margin:8px 0 0">' + esc(acctTypeLabel(a.type)) + ' · ' + fmtMonth(pts[0].ym) + ' → ' + fmtMonth(pts[pts.length - 1].ym) + '</p></div>';
+    } else {
+      html += '<div class="card"><div class="row"><span class="grow"><b>Current balance</b><div class="tiny">' + esc(acctTypeLabel(a.type)) + '</div></span>' +
+        (bal == null ? '<a data-x="setbal" style="cursor:pointer;color:var(--accent)">Set balance ›</a>'
+                     : '<b style="font-size:18px' + (bal < 0 ? ';color:var(--status-crit)' : '') + '">' + fmt$(bal) + '</b>') + '</div>' +
+        (bal == null ? '<p class="tiny" style="margin:8px 0 0">Set a balance to turn the trend below into real dollar amounts.</p>' : '') + '</div>';
+    }
+    // Balance-over-time chart with a trendline.
+    const chart = balanceChartHTML(pts);
+    if (chart){
+      const vals = pts.map((p) => p.bal), nn = vals.length;
+      const mx = (nn - 1) / 2, my = vals.reduce((x, y) => x + y, 0) / nn;
+      let num = 0, den = 0;
+      for (let i = 0; i < nn; i++){ num += (i - mx) * (vals[i] - my); den += (i - mx) * (i - mx); }
+      const perMo = den ? Math.round(num / den) : 0;
+      html += '<div class="card"><h3>' + (ser.anchored ? 'Balance over time' : 'Net flow over time') + '</h3>' + chart +
+        '<div class="legend"><span><i style="background:var(--viz-2)"></i>' + (ser.anchored ? 'Balance' : 'Cumulative flow') + '</span>' +
+        '<span><i style="background:var(--accent)"></i>Trend</span></div>' +
+        '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Trending ' + (perMo >= 0 ? '▲' : '▼') + ' ' + fmt$(Math.abs(perMo)) + '/mo' +
+        (ser.anchored ? '' : ' · set a balance for real dollar amounts') + '</span></div></div>';
+    }
   }
 
   // In / Out / Net for the year, on this account.
@@ -2129,6 +2185,7 @@ function renderAccountModal(c, acctId, close){
   c.querySelectorAll('.tree-row[data-cat]').forEach((n2) => {
     n2.onclick = () => { if (n2.dataset.cat === '__uncat'){ if (close) close(); showTab('review'); return; } ACT.acct = acctId; ACT.cat = n2.dataset.cat; actSetMonth(null); if (close) close(); showTab('activity'); };
   });
+  bindChartTips(c);
 }
 function renderMonthScreen(c, close){
   const agg = buildMonthAgg();
@@ -2578,6 +2635,48 @@ function bindChartTips(container){
     wrap.addEventListener('pointermove', move);
     wrap.addEventListener('pointerleave', () => { tip.style.display = 'none'; });
   });
+}
+// Balance-over-time line chart with a dashed linear-regression trendline. `pts` is
+// [{ym, bal}]. Caller binds hover via bindChartTips (full-height [data-tip] rects).
+function balanceChartHTML(pts){
+  if (!pts || pts.length < 2) return '';
+  const n = pts.length, vals = pts.map((p) => p.bal);
+  const padT = 16, padB = 22, padL = 6, padR = 6;
+  const W = Math.max(340, n * 34), H = 170;
+  const meanX = (n - 1) / 2, meanY = vals.reduce((a, b) => a + b, 0) / n;
+  let num = 0, den = 0;
+  for (let i = 0; i < n; i++){ num += (i - meanX) * (vals[i] - meanY); den += (i - meanX) * (i - meanX); }
+  const slope = den ? num / den : 0, intercept = meanY - slope * meanX;
+  const t0 = intercept, t1 = intercept + slope * (n - 1);
+  let lo = Math.min.apply(null, vals.concat([t0, t1])), hi = Math.max.apply(null, vals.concat([t0, t1]));
+  if (lo === hi){ const b = Math.max(1, Math.abs(lo) * 0.1); hi = lo + b; lo -= b; }
+  const pad = (hi - lo) * 0.12; lo -= pad; hi += pad;
+  const plotW = W - padL - padR, step = plotW / (n - 1);
+  const xF = (i) => padL + i * step;
+  const yF = (v) => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
+  let s = '';
+  for (let gi = 1; gi <= 3; gi++){
+    const gy = yF(lo + (hi - lo) * gi / 4).toFixed(1);
+    s += '<line x1="' + padL + '" y1="' + gy + '" x2="' + (W - padR) + '" y2="' + gy + '" stroke="var(--line)"/>';
+  }
+  if (lo < 0 && hi > 0){
+    const zy = yF(0).toFixed(1);
+    s += '<line x1="' + padL + '" y1="' + zy + '" x2="' + (W - padR) + '" y2="' + zy + '" stroke="var(--faint)" stroke-dasharray="2 3"/>';
+  }
+  const linePts = pts.map((p, i) => xF(i).toFixed(1) + ',' + yF(p.bal).toFixed(1));
+  const baseY = yF(Math.max(lo, Math.min(hi, 0)));
+  s += '<polygon points="' + xF(0).toFixed(1) + ',' + baseY.toFixed(1) + ' ' + linePts.join(' ') + ' ' + xF(n - 1).toFixed(1) + ',' + baseY.toFixed(1) + '" fill="var(--viz-2)" opacity="0.10"/>';
+  s += '<line x1="' + xF(0).toFixed(1) + '" y1="' + yF(t0).toFixed(1) + '" x2="' + xF(n - 1).toFixed(1) + '" y2="' + yF(t1).toFixed(1) + '" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="5 4" opacity="0.75"/>';
+  s += '<polyline points="' + linePts.join(' ') + '" fill="none" stroke="var(--viz-2)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>';
+  const every = Math.max(1, Math.ceil(n / 8));
+  pts.forEach((p, i) => {
+    const x = xF(i), y = yF(p.bal);
+    s += '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="3" fill="var(--viz-2)" stroke="var(--card)" stroke-width="1.5"/>';
+    s += '<rect data-tip="' + esc(fmtMonth(p.ym) + ' · <b>' + fmt$(p.bal) + '</b>') + '" x="' + (x - step / 2).toFixed(1) + '" y="0" width="' + step.toFixed(1) + '" height="' + H + '" fill="transparent" pointer-events="all"/>';
+    if (n <= 10 || i % every === 0 || i === n - 1)
+      s += '<text x="' + x.toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle" font-size="10" fill="var(--faint)" pointer-events="none">' + fmtMonth(p.ym).slice(0, 3) + '</text>';
+  });
+  return '<div class="chart-wrap"><svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" xmlns="http://www.w3.org/2000/svg">' + s + '</svg></div>';
 }
 // "Spending vs income" + "Where it goes" cards for the given months (rendered
 // on Home, scoped to the selected year). Caller binds taps via [data-m].
