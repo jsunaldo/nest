@@ -254,7 +254,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v4.6'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v4.7'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1456,6 +1456,39 @@ function btcStats(acctId){
   const value = (BTC_PRICE && sats > 0) ? Math.round(btc * BTC_PRICE.usd) : null;
   return { sats, btc, invested, avgCost, value, price: BTC_PRICE ? BTC_PRICE.usd : null };
 }
+// Month-by-month history for a Bitcoin account: cumulative sats + cost basis at each
+// month-end, plus a $ value using a price curve reconstructed from the implied price
+// of each buy (amt ÷ btc) linearly interpolated, with the live spot as the last anchor.
+// So value-over-time reflects real price movement as closely as the data allows.
+function btcSeries(acctId){
+  const txns = [];
+  for (const id in DATA.txns){ const t = DATA.txns[id]; if (t.deleted || t.acct !== acctId || !t.date) continue; txns.push(t); }
+  if (!txns.length) return { pts: [] };
+  txns.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const dnum = (d) => { const p = d.split('-').map(Number); return p[0] * 12 + (p[1] - 1) + ((p[2] || 1) - 1) / 31; };
+  const anchors = [];
+  for (const t of txns){ if (t.btc){ const price = Math.round(t.amt / (t.btc / 1e8)); if (price > 0) anchors.push({ d: dnum(t.date), price }); } }
+  if (BTC_PRICE && BTC_PRICE.usd > 0) anchors.push({ d: dnum(new Date().toISOString().slice(0, 10)), price: BTC_PRICE.usd });
+  anchors.sort((a, b) => a.d - b.d);
+  const priceAt = (dn) => {
+    if (!anchors.length) return null;
+    if (dn <= anchors[0].d) return anchors[0].price;
+    if (dn >= anchors[anchors.length - 1].d) return anchors[anchors.length - 1].price;
+    for (let i = 1; i < anchors.length; i++){ if (dn <= anchors[i].d){ const a = anchors[i - 1], b = anchors[i]; const f = b.d > a.d ? (dn - a.d) / (b.d - a.d) : 0; return Math.round(a.price + (b.price - a.price) * f); } }
+    return anchors[anchors.length - 1].price;
+  };
+  const firstYM = txns[0].date.slice(0, 7), curYM = currentYM();
+  const months = []; for (let y = firstYM; y <= curYM; y = shiftYM(y, 1)){ months.push(y); if (months.length > 600) break; }
+  let sats = 0, invested = 0, ti = 0;
+  const pts = months.map((ym) => {
+    const cutoff = ym + '-31';
+    while (ti < txns.length && txns[ti].date <= cutoff){ sats += txns[ti].btc || 0; invested += txns[ti].amt || 0; ti++; }
+    const price = priceAt(dnum(cutoff));
+    const value = price != null && sats > 0 ? Math.round((sats / 1e8) * price) : (sats > 0 ? null : 0);
+    return { ym, sats, btc: sats / 1e8, invested, price, value };
+  });
+  return { pts };
+}
 const fmtBtc = (sats) => (sats / 1e8).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 8 }) + ' ₿';
 function acctTypeLabel(t){ const e = ACCT_TYPES.find((x) => x[0] === t); return e ? e[1] : (t || ''); }
 function acctOptions(sel){
@@ -2137,11 +2170,38 @@ function renderAccountModal(c, acctId, close){
   if (isBtc){
     if (BTC_PRICE == null || Date.now() - (BTC_PRICE.at || 0) > 300000) refreshBtcPrice().then((r) => { if (r.changed && DATA.accounts[acctId]) renderAccountModal(c, acctId, close); });
     const b = btcStats(acctId), gain = b.value != null ? b.value - b.invested : null;
-    html += '<div class="card"><div class="stat-grid">' +
-      '<div class="stat"><div class="v">' + fmtBtc(b.sats) + '</div><div class="l">holdings</div></div>' +
-      '<div class="stat"><div class="v">' + (b.value != null ? fmt$(b.value) : '—') + '</div><div class="l">current value</div></div></div>' +
-      '<p class="tiny" style="margin:8px 0 0">Invested ' + fmt$(b.invested) + ' · avg ' + (b.avgCost ? fmt$(b.avgCost) : '—') + ' · now ' + (b.price ? fmt$(b.price) : '—') + '/₿' +
-      (gain != null ? ' · <b style="color:' + (gain >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(gain, { signed: true }) + '</b>' : '') + '</p></div>';
+    const gainPct = (gain != null && b.invested > 0) ? Math.round(1000 * gain / b.invested) / 10 : null;
+    const gc2 = gain != null ? (gain >= 0 ? 'var(--status-good)' : 'var(--status-crit)') : 'var(--text)';
+    const BTC_ORANGE = '#f7931a';
+    // Headline: holdings, current value, gain/loss.
+    html += '<div class="card"><div class="bl-row">' +
+      '<div class="bl-tile"><div class="bl-v" style="color:' + BTC_ORANGE + '">' + b.btc.toLocaleString('en-US', { maximumFractionDigits: 8 }) + ' ₿</div><div class="bl-l">Bitcoin</div></div>' +
+      '<div class="bl-tile"><div class="bl-v">' + (b.value != null ? fmt$(b.value) : '—') + '</div><div class="bl-l">Current value</div></div>' +
+      '<div class="bl-tile"><div class="bl-v" style="color:' + gc2 + '">' + (gain != null ? fmt$(gain, { signed: true }) : '—') + '</div><div class="bl-l">Gain / loss</div></div></div>' +
+      // Second row: invested, avg buy price, live spot.
+      '<div class="bl-row" style="margin-top:8px">' +
+      '<div class="bl-tile"><div class="bl-v">' + fmt$(b.invested) + '</div><div class="bl-l">Invested</div></div>' +
+      '<div class="bl-tile"><div class="bl-v">' + (b.avgCost ? fmt$(b.avgCost) : '—') + '</div><div class="bl-l">Avg buy price</div></div>' +
+      '<div class="bl-tile"><div class="bl-v" style="color:' + BTC_ORANGE + '">' + (b.price ? fmt$(b.price) : '…') + '</div><div class="bl-l">BTC price</div></div></div>' +
+      (gainPct != null ? '<p class="tiny" style="margin:9px 0 0;text-align:center">' + (gain >= 0 ? '▲' : '▼') + ' <b style="color:' + gc2 + '">' + (gainPct >= 0 ? '+' : '') + gainPct + '%</b> on your ' + fmt$(b.invested) + ' invested' + (b.price ? ' · live spot ' + fmt$(b.price) + '/₿' : '') + '</p>' : '') +
+      '</div>';
+
+    // Charts: holdings (₿) over time, and value vs invested ($) over time.
+    const bs = btcSeries(acctId);
+    if (bs.pts.length >= 2){
+      const months = bs.pts.map((p) => p.ym);
+      const holdChart = miniLineChart(months, [{ name: 'Holdings', color: BTC_ORANGE, area: true, vals: bs.pts.map((p) => p.sats) }], (v) => (v / 1e8).toLocaleString('en-US', { maximumFractionDigits: 8 }) + ' ₿', { min: 0 });
+      html += '<div class="card"><h3>Bitcoin holdings over time</h3>' + holdChart +
+        '<div class="legend"><span><i style="background:' + BTC_ORANGE + '"></i>BTC accumulated</span></div>' +
+        '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Stacked ' + b.btc.toLocaleString('en-US', { maximumFractionDigits: 8 }) + ' ₿ so far.</span></div></div>';
+      const valChart = miniLineChart(months, [
+        { name: 'Value', color: 'var(--viz-2)', area: true, vals: bs.pts.map((p) => p.value) },
+        { name: 'Invested', color: 'var(--faint)', vals: bs.pts.map((p) => p.invested) },
+      ], (v) => fmt$(v), { min: 0 });
+      html += '<div class="card"><h3>Value vs invested over time</h3>' + valChart +
+        '<div class="legend"><span><i style="background:var(--viz-2)"></i>Current value</span><span><i style="background:var(--faint)"></i>Cost basis</span></div>' +
+        '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Value uses a price curve reconstructed from your buy prices + live spot — an estimate between purchases.</span></div></div>';
+    }
   } else {
     const bal = accountBalance(a);
     const ser = accountBalanceSeries(a), pts = ser.pts;
@@ -2174,25 +2234,28 @@ function renderAccountModal(c, acctId, close){
     }
   }
 
-  // In / Out / Net for the year, on this account.
-  html += '<div class="month-nav"><button data-x="yprev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button><b>' + esc(UI.year) + '</b>' +
-    '<button data-x="ynext"' + (yi >= years.length - 1 ? ' disabled' : '') + '>›</button></div>';
-  const net = st.income - st.spend;
-  html += '<div class="bl-row">' +
-    '<div class="bl-tile"><div class="bl-v amt-pos">' + fmt$(st.income) + '</div><div class="bl-l">In</div></div>' +
-    '<div class="bl-tile"><div class="bl-v">' + fmt$(st.spend) + '</div><div class="bl-l">Out</div></div>' +
-    '<div class="bl-tile"><div class="bl-v" style="color:' + (net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(net, { signed: true }) + '</div><div class="bl-l">Net</div></div></div>';
+  // Cash-flow sections (In/Out/Net, categories, months) — not for a Bitcoin stack.
+  if (!isBtc){
+    // In / Out / Net for the year, on this account.
+    html += '<div class="month-nav"><button data-x="yprev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button><b>' + esc(UI.year) + '</b>' +
+      '<button data-x="ynext"' + (yi >= years.length - 1 ? ' disabled' : '') + '>›</button></div>';
+    const net = st.income - st.spend;
+    html += '<div class="bl-row">' +
+      '<div class="bl-tile"><div class="bl-v amt-pos">' + fmt$(st.income) + '</div><div class="bl-l">In</div></div>' +
+      '<div class="bl-tile"><div class="bl-v">' + fmt$(st.spend) + '</div><div class="bl-l">Out</div></div>' +
+      '<div class="bl-tile"><div class="bl-v" style="color:' + (net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(net, { signed: true }) + '</div><div class="bl-l">Net</div></div></div>';
 
-  // Category breakdown for this account (collapsible tree).
-  const gc = groupedCatHTML(st.byCat, st.incomeByCat, st.investByCat, { pfx: 'acct' });
-  if (gc) html += '<div class="card"><h3>' + esc(UI.year) + ' by category</h3>' + gc + '</div>';
+    // Category breakdown for this account (collapsible tree).
+    const gc = groupedCatHTML(st.byCat, st.incomeByCat, st.investByCat, { pfx: 'acct' });
+    if (gc) html += '<div class="card"><h3>' + esc(UI.year) + ' by category</h3>' + gc + '</div>';
 
-  // Month by month, this account.
-  if (st.perMonth.length)
-    html += '<div class="card"><h3>Month by month</h3>' + st.perMonth.slice().reverse().map((mm) =>
-      '<div class="list-item" style="cursor:default"><div class="body"><div class="t1">' + fmtMonth(mm.ym) + '</div>' +
-      '<div class="t2">out ' + fmt$(mm.spend) + ' · in ' + fmt$(mm.income) + '</div></div>' +
-      '<span class="amt" style="color:' + (mm.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(mm.net, { signed: true }) + '</span></div>').join('') + '</div>';
+    // Month by month, this account.
+    if (st.perMonth.length)
+      html += '<div class="card"><h3>Month by month</h3>' + st.perMonth.slice().reverse().map((mm) =>
+        '<div class="list-item" style="cursor:default"><div class="body"><div class="t1">' + fmtMonth(mm.ym) + '</div>' +
+        '<div class="t2">out ' + fmt$(mm.spend) + ' · in ' + fmt$(mm.income) + '</div></div>' +
+        '<span class="amt" style="color:' + (mm.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(mm.net, { signed: true }) + '</span></div>').join('') + '</div>';
+  }
 
   html += '<div class="row" style="margin-bottom:16px"><button class="btn grow" data-x="edit">⚙️ Edit account</button>' +
     '<button class="btn btn-primary grow" data-x="acts">Open in Activity →</button></div>';
@@ -2200,8 +2263,8 @@ function renderAccountModal(c, acctId, close){
 
   const q = (s) => c.querySelector(s);
   q('[data-x=mclose]').onclick = () => close && close();
-  q('[data-x=yprev]').onclick = () => { UI.year = years[yi - 1]; renderAccountModal(c, acctId, close); };
-  q('[data-x=ynext]').onclick = () => { UI.year = years[yi + 1]; renderAccountModal(c, acctId, close); };
+  const yp = q('[data-x=yprev]'); if (yp) yp.onclick = () => { UI.year = years[yi - 1]; renderAccountModal(c, acctId, close); };
+  const yn = q('[data-x=ynext]'); if (yn) yn.onclick = () => { UI.year = years[yi + 1]; renderAccountModal(c, acctId, close); };
   q('[data-x=edit]').onclick = () => openAccountEditor(acctId, () => { if (DATA.accounts[acctId]) renderAccountModal(c, acctId, close); else if (close) close(); });
   const sb = q('[data-x=setbal]'); if (sb) sb.onclick = () => openAccountEditor(acctId, () => renderAccountModal(c, acctId, close));
   q('[data-x=acts]').onclick = () => { if (close) close(); ACT.acct = acctId; ACT.cat = null; actSetMonth(null); showTab('activity'); };
@@ -2699,6 +2762,40 @@ function balanceChartHTML(pts){
     s += '<rect data-tip="' + esc(fmtMonth(p.ym) + ' · <b>' + fmt$(p.bal) + '</b>') + '" x="' + (x - step / 2).toFixed(1) + '" y="0" width="' + step.toFixed(1) + '" height="' + H + '" fill="transparent" pointer-events="all"/>';
     if (n <= 10 || i % every === 0 || i === n - 1)
       s += '<text x="' + x.toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle" font-size="10" fill="var(--faint)" pointer-events="none">' + fmtMonth(p.ym).slice(0, 3) + '</text>';
+  });
+  return '<div class="chart-wrap"><svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" xmlns="http://www.w3.org/2000/svg">' + s + '</svg></div>';
+}
+// Generic month-indexed multi-line chart. months: ['YYYY-MM',…]. series:
+// [{name,color,vals,area?}]. fmtV(v) formats a value for the hover tooltip.
+// opts: { min } forces a y-floor (e.g. 0). Caller wraps in a card + binds tips.
+function miniLineChart(months, series, fmtV, opts){
+  opts = opts || {};
+  const n = months.length;
+  if (n < 2 || !series.length) return '';
+  const padT = 16, padB = 22, padL = 6, padR = 6;
+  const W = Math.max(340, n * 34), H = 170;
+  let lo = Infinity, hi = -Infinity;
+  for (const se of series) for (const v of se.vals){ if (v == null) continue; if (v < lo) lo = v; if (v > hi) hi = v; }
+  if (!isFinite(lo)){ lo = 0; hi = 1; }
+  if (opts.min != null) lo = Math.min(lo, opts.min);
+  if (lo === hi) hi = lo + Math.max(1, Math.abs(lo) * 0.1);
+  const padv = (hi - lo) * 0.12 || 1; if (opts.min == null) lo -= padv; hi += padv;
+  const step = (W - padL - padR) / (n - 1);
+  const xF = (i) => padL + i * step;
+  const yF = (v) => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
+  let s = '';
+  for (let gi = 1; gi <= 3; gi++){ const gy = yF(lo + (hi - lo) * gi / 4).toFixed(1); s += '<line x1="' + padL + '" y1="' + gy + '" x2="' + (W - padR) + '" y2="' + gy + '" stroke="var(--line)"/>'; }
+  for (const se of series){
+    const pv = se.vals.map((v, i) => (v == null ? null : xF(i).toFixed(1) + ',' + yF(v).toFixed(1))).filter((x) => x);
+    if (se.area && pv.length){ const b = yF(Math.max(lo, opts.min != null ? opts.min : lo)); s += '<polygon points="' + pv[0].split(',')[0] + ',' + b.toFixed(1) + ' ' + pv.join(' ') + ' ' + pv[pv.length - 1].split(',')[0] + ',' + b.toFixed(1) + '" fill="' + se.color + '" opacity="0.12"/>'; }
+    s += '<polyline points="' + pv.join(' ') + '" fill="none" stroke="' + se.color + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>';
+    const last = se.vals[n - 1]; if (last != null) s += '<circle cx="' + xF(n - 1).toFixed(1) + '" cy="' + yF(last).toFixed(1) + '" r="3.5" fill="' + se.color + '" stroke="var(--card)" stroke-width="1.5"/>';
+  }
+  const every = Math.max(1, Math.ceil(n / 8));
+  months.forEach((ym, i) => {
+    if (n <= 10 || i % every === 0 || i === n - 1) s += '<text x="' + xF(i).toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle" font-size="10" fill="var(--faint)" pointer-events="none">' + fmtMonth(ym).slice(0, 3) + '</text>';
+    const tip = '<b>' + fmtMonth(ym) + '</b>' + series.map((se) => '<br>' + esc(se.name) + ' ' + (se.vals[i] == null ? '—' : fmtV(se.vals[i]))).join('');
+    s += '<rect data-tip="' + esc(tip) + '" x="' + (xF(i) - step / 2).toFixed(1) + '" y="0" width="' + step.toFixed(1) + '" height="' + H + '" fill="transparent" pointer-events="all"/>';
   });
   return '<div class="chart-wrap"><svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" xmlns="http://www.w3.org/2000/svg">' + s + '</svg></div>';
 }
