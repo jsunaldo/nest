@@ -256,7 +256,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v4.9'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v5.0'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1387,9 +1387,10 @@ let LAST_IMPORT_ACCT = null;
 const REVIEW_SKIP = new Set();
 const REVIEW = { mode: 'sort', month: null, acct: null }; // Review tab: auto-sort queue vs manual verify pass
 let HOME_BL = 'overall'; // Bottom Line lens: overall | recurring | oneoff
-let HOME_YEAR = 'all';   // Home year lens: 'all' (Overall, default) or a 'YYYY'
-let ACCT_YEAR = 'all';   // Account-popup year lens: 'all' or a 'YYYY'
+let YEAR_LENS = 'all';   // ONE shared year lens (Home + account popup): 'all' (Overall) or a 'YYYY'
 const yearLabel = (y) => (y === 'all' ? 'Overall' : y);
+// Every year that appears anywhere in the data (ascending) — the year-nav option set.
+function dataYearList(){ return Array.from(new Set(liveTxns().map((t) => ymOf(t.date).slice(0, 4)))).sort(); }
 const ACT = { q: '', acct: null, cat: null, year: null, mo: null, status: null, limit: 200, select: false, sel: new Set() };
 function actSetMonth(ym){ if (ym){ ACT.year = ym.slice(0, 4); ACT.mo = ym.slice(5, 7); } else { ACT.year = null; ACT.mo = null; } }
 const TRENDS_SEL = { month: null };
@@ -1415,7 +1416,7 @@ function accountBalanceAt(acct, asOf){
 // End-of-month balance for each month the account has activity. When the account
 // is anchored (a real balance is set) the points are absolute balances; otherwise
 // they're cumulative net flow from 0 (shape is right, the zero point isn't).
-function accountBalanceSeries(acct){
+function accountBalanceSeries(acct, year){
   if (!acct) return { pts: [], anchored: false };
   const monthly = {};
   let minYM = null, maxYM = null;
@@ -1441,6 +1442,9 @@ function accountBalanceSeries(acct){
     let run = 0;
     pts = months.map((ym) => { run += (monthly[ym] || 0); return { ym, bal: run }; });
   }
+  // Scope to a single year if asked — values stay cumulative (they carry in the
+  // running total from prior years), we just plot that year's month-ends.
+  if (year && year !== 'all') pts = pts.filter((p) => p.ym.slice(0, 4) === year);
   return { pts, anchored };
 }
 const ACCT_TYPES = [['checking', 'Checking'], ['savings', 'Savings'], ['investment', 'Investment'], ['btc', 'Bitcoin Investment'], ['credit', 'Credit card']];
@@ -1483,7 +1487,7 @@ function btcStats(acctId){
 // month-end, plus a $ value using a price curve reconstructed from the implied price
 // of each buy (amt ÷ btc) linearly interpolated, with the live spot as the last anchor.
 // So value-over-time reflects real price movement as closely as the data allows.
-function btcSeries(acctId){
+function btcSeries(acctId, year){
   const txns = [];
   for (const id in DATA.txns){ const t = DATA.txns[id]; if (t.deleted || t.acct !== acctId || !t.date) continue; txns.push(t); }
   if (!txns.length) return { pts: [] };
@@ -1510,7 +1514,8 @@ function btcSeries(acctId){
     const value = price != null && sats > 0 ? Math.round((sats / 1e8) * price) : (sats > 0 ? null : 0);
     return { ym, sats, btc: sats / 1e8, invested, price, value };
   });
-  return { pts };
+  // Scope to a single year — cumulative holdings/cost basis carry in from prior years.
+  return { pts: (year && year !== 'all') ? pts.filter((p) => p.ym.slice(0, 4) === year) : pts };
 }
 const fmtBtc = (sats) => (sats / 1e8).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 8 }) + ' ₿';
 function acctTypeLabel(t){ const e = ACCT_TYPES.find((x) => x[0] === t); return e ? e[1] : (t || ''); }
@@ -2013,19 +2018,20 @@ function renderHome(){
     return;
   }
   const agg = buildMonthAgg();
-  const years = Array.from(new Set(Object.keys(agg).map((ym) => ym.slice(0, 4)))).sort();
   // Year lens: 'all' (Overall) is the default; arrows/dropdown step through it + each year.
+  // Options are the GLOBAL year set so the shared lens is always valid across views.
+  const years = dataYearList();
   const yearSeq = ['all'].concat(years);
-  if (HOME_YEAR !== 'all' && !years.includes(HOME_YEAR)) HOME_YEAR = 'all';
-  const yi = yearSeq.indexOf(HOME_YEAR);
-  const st = yearStats(agg, HOME_YEAR);
+  if (YEAR_LENS !== 'all' && !years.includes(YEAR_LENS)) YEAR_LENS = 'all';
+  const yi = yearSeq.indexOf(YEAR_LENS);
+  const st = yearStats(agg, YEAR_LENS);
   const baseline = baselineByCat(agg);
   const rq = reviewTxns();
   const rqOut = rq.reduce((s, t) => s + (t.amt < 0 ? -t.amt : 0), 0);
   const rqIn = rq.reduce((s, t) => s + (t.amt > 0 ? t.amt : 0), 0);
 
   let html = '<div class="month-nav"><button data-x="prev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button>' +
-    '<select data-x="ysel" class="ynav-sel">' + yearSeq.map((y) => '<option value="' + y + '"' + (y === HOME_YEAR ? ' selected' : '') + '>' + esc(yearLabel(y)) + '</option>').join('') + '</select>' +
+    '<select data-x="ysel" class="ynav-sel">' + yearSeq.map((y) => '<option value="' + y + '"' + (y === YEAR_LENS ? ' selected' : '') + '>' + esc(yearLabel(y)) + '</option>').join('') + '</select>' +
     '<button data-x="next"' + (yi >= yearSeq.length - 1 ? ' disabled' : '') + '>›</button></div>';
 
   // Account balances — each account listed with its current balance (or a prompt
@@ -2080,7 +2086,7 @@ function renderHome(){
     // Projection strip (overall/recurring only).
     (proj
       ? '<div class="bl-proj ' + (proj.net >= 0 ? 'good' : 'bad') + '">' +
-        '<div class="grow"><div class="tiny" style="text-transform:uppercase;letter-spacing:.5px">Projected end of ' + esc(HOME_YEAR) + '</div>' +
+        '<div class="grow"><div class="tiny" style="text-transform:uppercase;letter-spacing:.5px">Projected end of ' + esc(YEAR_LENS) + '</div>' +
         '<b style="font-size:19px;color:' + (proj.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(proj.net, { signed: true }) + '</b> ' +
         '<span class="tiny">' + (proj.net >= 0 ? '▲ on track to come out ahead' : '▼ on pace to go under') + '</span></div>' +
         '<div class="tiny" style="text-align:right;white-space:nowrap">' + fmt$(proj.rateIncome) + '/mo in<br>' + fmt$(proj.rateSpend) + '/mo out</div></div>'
@@ -2110,9 +2116,9 @@ function renderHome(){
     html += yearChartsHTML(agg, st.months, chartSel, baseline);
   }
 
-  const cuts = cutSuggestions(agg, HOME_YEAR);
+  const cuts = cutSuggestions(agg, YEAR_LENS);
   if (cuts.length){
-    html += '<div class="card"><h3>Where to cut</h3><p class="tiny" style="margin:0 0 6px">Most over their expected pace' + (HOME_YEAR === 'all' ? ' (all time' : ' in ' + esc(HOME_YEAR) + ' (') + ', full months only)</p>' +
+    html += '<div class="card"><h3>Where to cut</h3><p class="tiny" style="margin:0 0 6px">Most over their expected pace' + (YEAR_LENS === 'all' ? ' (all time' : ' in ' + esc(YEAR_LENS) + ' (') + ', full months only)</p>' +
       cuts.map((x) => '<div class="list-item" data-cat="' + esc(x.cat.id) + '"><span class="ic">' + esc(x.cat.icon || '•') + '</span>' +
         '<div class="body"><div class="t1">' + esc(x.cat.name) + '</div><div class="t2">' + fmt$(x.ytd) + ' spent vs ' + fmt$(x.expected) + ' expected</div></div>' +
         '<span class="amt" style="color:var(--status-crit)">+' + fmt$(x.over) + '</span></div>').join('') + '</div>';
@@ -2125,7 +2131,7 @@ function renderHome(){
   // scan than one flat list.
   const gc = groupedCatHTML(st.byCat, st.incomeByCat, st.investByCat, { pfx: 'y' });
   if (gc)
-    html += '<div class="card"><h3>' + esc(yearLabel(HOME_YEAR)) + ' by category</h3>' +
+    html += '<div class="card"><h3>' + esc(yearLabel(YEAR_LENS)) + ' by category</h3>' +
       '<p class="tiny" style="margin:0 0 4px">Tap a group or subcategory to expand · tap a category to open it</p>' +
       gc + '</div>';
 
@@ -2147,9 +2153,9 @@ function renderHome(){
   html += '<button class="btn btn-primary btn-block" data-x="import" style="margin-bottom:16px">📥 Import statements</button>';
   c.innerHTML = html;
 
-  c.querySelector('[data-x=prev]').onclick = () => { HOME_YEAR = yearSeq[yi - 1]; renderHome(); };
-  c.querySelector('[data-x=next]').onclick = () => { HOME_YEAR = yearSeq[yi + 1]; renderHome(); };
-  c.querySelector('[data-x=ysel]').onchange = (e) => { HOME_YEAR = e.target.value; renderHome(); };
+  c.querySelector('[data-x=prev]').onclick = () => { YEAR_LENS = yearSeq[yi - 1]; renderHome(); };
+  c.querySelector('[data-x=next]').onclick = () => { YEAR_LENS = yearSeq[yi + 1]; renderHome(); };
+  c.querySelector('[data-x=ysel]').onchange = (e) => { YEAR_LENS = e.target.value; renderHome(); };
   const on = (sel, fn) => { const n2 = c.querySelector(sel); if (n2) n2.onclick = fn; };
   on('[data-x=rev]', () => showTab('review'));
   on('[data-x=recur]', () => showTab('recurring'));
@@ -2185,62 +2191,82 @@ function openMonthModal(ym){
 }
 // A scrollable popup of the Home overview, scoped to one account.
 function openAccountModal(acctId){
-  const m = modal('', '<div data-x="abody"></div>');
+  // On close, re-render the underlying tab so a year change made inside the popup
+  // (shared YEAR_LENS) is reflected back on Home immediately.
+  const m = modal('', '<div data-x="abody"></div>', () => renderCurrent());
   renderAccountModal(m.node.querySelector('[data-x=abody]'), acctId, m.close);
 }
 function renderAccountModal(c, acctId, close){
   const a = DATA.accounts[acctId];
   if (!a){ if (close) close(); return; }
   const agg = buildMonthAgg(acctId);
-  const years = Array.from(new Set(Object.keys(agg).map((ym) => ym.slice(0, 4)))).sort();
+  // Use the GLOBAL year set so the shared lens carries in from Home even if this
+  // account had no activity that year (it just shows empty for that year).
+  const years = dataYearList();
   const yearSeq = ['all'].concat(years);
-  if (ACCT_YEAR !== 'all' && !years.includes(ACCT_YEAR)) ACCT_YEAR = 'all';
-  const yi = yearSeq.indexOf(ACCT_YEAR);
-  const st = yearStats(agg, ACCT_YEAR);
+  const yi = yearSeq.indexOf(YEAR_LENS) < 0 ? 0 : yearSeq.indexOf(YEAR_LENS);
+  const st = yearStats(agg, YEAR_LENS);
   const isBtc = a.type === 'btc';
 
   let html = '<div class="modal-closebar"><button class="btn btn-sm" data-x="mclose">✕ Close</button>' +
     '<b>' + acctIcon(a.type) + ' ' + esc(a.name) + '</b><div style="width:64px"></div></div>';
 
+  // Shared year lens — scopes EVERYTHING below (charts, tiles, tables) to the year.
+  html += '<div class="month-nav"><button data-x="yprev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button>' +
+    '<select data-x="ysel" class="ynav-sel">' + yearSeq.map((y) => '<option value="' + y + '"' + (y === YEAR_LENS ? ' selected' : '') + '>' + esc(yearLabel(y)) + '</option>').join('') + '</select>' +
+    '<button data-x="ynext"' + (yi >= yearSeq.length - 1 ? ' disabled' : '') + '>›</button></div>';
+
   // Balance / holdings header.
   if (isBtc){
     if (BTC_PRICE == null || Date.now() - (BTC_PRICE.at || 0) > 300000) refreshBtcPrice().then((r) => { if (r.changed && DATA.accounts[acctId]) renderAccountModal(c, acctId, close); });
-    const b = btcStats(acctId), gain = b.value != null ? b.value - b.invested : null;
+    const scoped = YEAR_LENS !== 'all';
+    const bs = btcSeries(acctId, YEAR_LENS);
+    // Stats: all-time = live; a specific year = the state at the END of that year
+    // (cumulative holdings/cost carry in), read off the last scoped point.
+    let b;
+    if (!scoped){ b = btcStats(acctId); }
+    else { const lp = bs.pts[bs.pts.length - 1];
+      if (lp){ const btc = lp.sats / 1e8; b = { sats: lp.sats, btc, invested: lp.invested, value: lp.value, price: lp.price, avgCost: btc > 0 ? Math.round(lp.invested / btc) : 0 }; }
+      else { b = { sats: 0, btc: 0, invested: 0, value: 0, price: (BTC_PRICE ? BTC_PRICE.usd : null), avgCost: 0 }; } }
+    const gain = b.value != null ? b.value - b.invested : null;
     const gainPct = (gain != null && b.invested > 0) ? Math.round(1000 * gain / b.invested) / 10 : null;
     const gc2 = gain != null ? (gain >= 0 ? 'var(--status-good)' : 'var(--status-crit)') : 'var(--text)';
     const BTC_ORANGE = '#f7931a';
-    // Headline: holdings, current value, gain/loss.
+    const valLbl = scoped ? 'Value' : 'Current value', priceLbl = scoped ? 'Price' : 'BTC price';
+    // Headline: holdings, value, gain/loss.
     html += '<div class="card"><div class="bl-row">' +
       '<div class="bl-tile"><div class="bl-v" style="color:' + BTC_ORANGE + '">' + b.btc.toLocaleString('en-US', { maximumFractionDigits: 8 }) + ' ₿</div><div class="bl-l">Bitcoin</div></div>' +
-      '<div class="bl-tile"><div class="bl-v">' + (b.value != null ? fmt$(b.value) : '—') + '</div><div class="bl-l">Current value</div></div>' +
+      '<div class="bl-tile"><div class="bl-v">' + (b.value != null ? fmt$(b.value) : '—') + '</div><div class="bl-l">' + valLbl + '</div></div>' +
       '<div class="bl-tile"><div class="bl-v" style="color:' + gc2 + '">' + (gain != null ? fmt$(gain, { signed: true }) : '—') + '</div><div class="bl-l">Gain / loss</div></div></div>' +
-      // Second row: invested, avg buy price, live spot.
+      // Second row: invested, avg buy price, price.
       '<div class="bl-row" style="margin-top:8px">' +
       '<div class="bl-tile"><div class="bl-v">' + fmt$(b.invested) + '</div><div class="bl-l">Invested</div></div>' +
       '<div class="bl-tile"><div class="bl-v">' + (b.avgCost ? fmt$(b.avgCost) : '—') + '</div><div class="bl-l">Avg buy price</div></div>' +
-      '<div class="bl-tile"><div class="bl-v" style="color:' + BTC_ORANGE + '">' + (b.price ? fmt$(b.price) : '…') + '</div><div class="bl-l">BTC price</div></div></div>' +
-      (gainPct != null ? '<p class="tiny" style="margin:9px 0 0;text-align:center">' + (gain >= 0 ? '▲' : '▼') + ' <b style="color:' + gc2 + '">' + (gainPct >= 0 ? '+' : '') + gainPct + '%</b> on your ' + fmt$(b.invested) + ' invested' + (b.price ? ' · live spot ' + fmt$(b.price) + '/₿' : '') + '</p>' : '') +
+      '<div class="bl-tile"><div class="bl-v" style="color:' + BTC_ORANGE + '">' + (b.price ? fmt$(b.price) : '…') + '</div><div class="bl-l">' + priceLbl + '</div></div></div>' +
+      (gainPct != null ? '<p class="tiny" style="margin:9px 0 0;text-align:center">' + (gain >= 0 ? '▲' : '▼') + ' <b style="color:' + gc2 + '">' + (gainPct >= 0 ? '+' : '') + gainPct + '%</b> on your ' + fmt$(b.invested) + ' invested' + (b.price ? (scoped ? ' · ' + fmt$(b.price) + '/₿ at year-end' : ' · live spot ' + fmt$(b.price) + '/₿') : '') + '</p>' : '') +
+      (scoped ? '<p class="tiny" style="margin:4px 0 0;text-align:center;color:var(--faint)">As of end of ' + esc(YEAR_LENS) + ' — switch the year above for all-time.</p>' : '') +
       '</div>';
 
     // Charts: holdings (₿) over time, and value vs invested ($) over time.
-    const bs = btcSeries(acctId);
     if (bs.pts.length >= 2){
       const months = bs.pts.map((p) => p.ym);
       const holdChart = miniLineChart(months, [{ name: 'Holdings', color: BTC_ORANGE, area: true, vals: bs.pts.map((p) => p.sats) }], (v) => (v / 1e8).toLocaleString('en-US', { maximumFractionDigits: 8 }) + ' ₿', { min: 0 });
-      html += '<div class="card"><h3>Bitcoin holdings over time</h3>' + holdChart +
+      html += '<div class="card"><h3>Bitcoin holdings over time' + (scoped ? ' · ' + esc(YEAR_LENS) : '') + '</h3>' + holdChart +
         '<div class="legend"><span><i style="background:' + BTC_ORANGE + '"></i>BTC accumulated</span></div>' +
-        '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Stacked ' + b.btc.toLocaleString('en-US', { maximumFractionDigits: 8 }) + ' ₿ so far.</span></div></div>';
+        '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Stacked ' + b.btc.toLocaleString('en-US', { maximumFractionDigits: 8 }) + ' ₿ ' + (scoped ? 'by end of ' + esc(YEAR_LENS) : 'so far') + '.</span></div></div>';
       const valChart = miniLineChart(months, [
         { name: 'Value', color: 'var(--viz-2)', area: true, vals: bs.pts.map((p) => p.value) },
         { name: 'Invested', color: 'var(--faint)', vals: bs.pts.map((p) => p.invested) },
       ], (v) => fmt$(v), { min: 0 });
-      html += '<div class="card"><h3>Value vs invested over time</h3>' + valChart +
-        '<div class="legend"><span><i style="background:var(--viz-2)"></i>Current value</span><span><i style="background:var(--faint)"></i>Cost basis</span></div>' +
+      html += '<div class="card"><h3>Value vs invested over time' + (scoped ? ' · ' + esc(YEAR_LENS) : '') + '</h3>' + valChart +
+        '<div class="legend"><span><i style="background:var(--viz-2)"></i>Value</span><span><i style="background:var(--faint)"></i>Cost basis</span></div>' +
         '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Value uses a price curve reconstructed from your buy prices + live spot — an estimate between purchases.</span></div></div>';
+    } else if (scoped){
+      html += '<div class="card"><p class="muted" style="margin:0">No Bitcoin holdings to chart in ' + esc(YEAR_LENS) + '.</p></div>';
     }
   } else {
     const bal = accountBalance(a);
-    const ser = accountBalanceSeries(a), pts = ser.pts;
+    const ser = accountBalanceSeries(a, YEAR_LENS), pts = ser.pts;
     if (ser.anchored && pts.length){
       const startBal = pts[0].bal, curBal = pts[pts.length - 1].bal, delta = curBal - startBal;
       html += '<div class="card"><div class="bl-row">' +
@@ -2271,11 +2297,8 @@ function renderAccountModal(c, acctId, close){
   }
 
   // Cash-flow sections (In/Out/Net, categories, months) — not for a Bitcoin stack.
+  // Scoped to the same year lens shown in the nav at the top.
   if (!isBtc){
-    // In / Out / Net for the selected lens (Overall by default), on this account.
-    html += '<div class="month-nav"><button data-x="yprev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button>' +
-      '<select data-x="ysel" class="ynav-sel">' + yearSeq.map((y) => '<option value="' + y + '"' + (y === ACCT_YEAR ? ' selected' : '') + '>' + esc(yearLabel(y)) + '</option>').join('') + '</select>' +
-      '<button data-x="ynext"' + (yi >= yearSeq.length - 1 ? ' disabled' : '') + '>›</button></div>';
     const net = st.income - st.spend;
     html += '<div class="bl-row">' +
       '<div class="bl-tile"><div class="bl-v amt-pos">' + fmt$(st.income) + '</div><div class="bl-l">In</div></div>' +
@@ -2284,7 +2307,7 @@ function renderAccountModal(c, acctId, close){
 
     // Category breakdown for this account (collapsible tree).
     const gc = groupedCatHTML(st.byCat, st.incomeByCat, st.investByCat, { pfx: 'acct' });
-    if (gc) html += '<div class="card"><h3>' + esc(yearLabel(ACCT_YEAR)) + ' by category</h3>' + gc + '</div>';
+    if (gc) html += '<div class="card"><h3>' + esc(yearLabel(YEAR_LENS)) + ' by category</h3>' + gc + '</div>';
 
     // Month by month, this account.
     if (st.perMonth.length)
@@ -2300,9 +2323,9 @@ function renderAccountModal(c, acctId, close){
 
   const q = (s) => c.querySelector(s);
   q('[data-x=mclose]').onclick = () => close && close();
-  const yp = q('[data-x=yprev]'); if (yp) yp.onclick = () => { ACCT_YEAR = yearSeq[yi - 1]; renderAccountModal(c, acctId, close); };
-  const yn = q('[data-x=ynext]'); if (yn) yn.onclick = () => { ACCT_YEAR = yearSeq[yi + 1]; renderAccountModal(c, acctId, close); };
-  const ys = q('[data-x=ysel]'); if (ys) ys.onchange = (e) => { ACCT_YEAR = e.target.value; renderAccountModal(c, acctId, close); };
+  const yp = q('[data-x=yprev]'); if (yp) yp.onclick = () => { YEAR_LENS = yearSeq[yi - 1]; renderAccountModal(c, acctId, close); };
+  const yn = q('[data-x=ynext]'); if (yn) yn.onclick = () => { YEAR_LENS = yearSeq[yi + 1]; renderAccountModal(c, acctId, close); };
+  const ys = q('[data-x=ysel]'); if (ys) ys.onchange = (e) => { YEAR_LENS = e.target.value; renderAccountModal(c, acctId, close); };
   q('[data-x=edit]').onclick = () => openAccountEditor(acctId, () => { if (DATA.accounts[acctId]) renderAccountModal(c, acctId, close); else if (close) close(); });
   const sb = q('[data-x=setbal]'); if (sb) sb.onclick = () => openAccountEditor(acctId, () => renderAccountModal(c, acctId, close));
   q('[data-x=acts]').onclick = () => { if (close) close(); ACT.acct = acctId; ACT.cat = null; actSetMonth(null); showTab('activity'); };
