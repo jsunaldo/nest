@@ -256,7 +256,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v5.1'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v5.2'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -435,7 +435,14 @@ let DATA = null;
 const UI = { month: currentYM() };
 
 function loadData(){
-  try { DATA = JSON.parse(localStorage.getItem(LSKEY)); } catch (e) { DATA = null; }
+  const raw = localStorage.getItem(LSKEY);
+  try { DATA = JSON.parse(raw); } catch (e) {
+    // Non-empty but unparseable = corruption, not a fresh install. Stash the raw
+    // blob before we reseed and the next save overwrites it, so nothing is lost
+    // silently — it can be recovered from localStorage (LSKEY + '.corrupt.<ts>').
+    if (raw){ try { localStorage.setItem(LSKEY + '.corrupt.' + Date.now(), raw); } catch (_) {} }
+    DATA = null;
+  }
   if (!DATA || typeof DATA !== 'object') DATA = {};
   for (const m of SYNC_MAPS) DATA[m] = DATA[m] || {};
   seedIfEmpty();
@@ -446,7 +453,12 @@ function loadData(){
 // seed categories on both new and existing installs.
 function runMigrations(){
   const cur = (DATA.kv.migrations && DATA.kv.migrations.v) || 0;
-  const setCat = (id, patch) => { const c = DATA.cats[id]; if (c && !c.deleted){ Object.assign(c, patch); put('cats', c); } };
+  // Migration writes use SEED_TS (an old fixed timestamp), NOT now(): on multi-device
+  // sync a stale device catching up on a migration must never win last-write-wins
+  // against a genuinely newer edit a peer made to the same entity. Migrations are
+  // deterministic, so both devices converge on the same content regardless.
+  const putSeed = (map, ent) => { ent.updatedAt = SEED_TS; DATA[map][ent.id] = ent; saveData(); markDirty(); };
+  const setCat = (id, patch) => { const c = DATA.cats[id]; if (c && !c.deleted){ Object.assign(c, patch); putSeed('cats', c); } };
   if (cur < 1){
     // v3.5 — subcategories. Utilities under Housing; House Setup becomes a
     // subcategory of Housing (its cats kept one-time); Maintenance joins it;
@@ -456,17 +468,17 @@ function runMigrations(){
     setCat('hou-maint', { sub: 'House Setup' });
     setCat('tr-car', { name: 'Jason Car Payment', sub: 'Car Payment' });
     if (!DATA.cats['tr-car-s'])
-      put('cats', { id: 'tr-car-s', group: 'g-tr', sub: 'Car Payment', name: 'Shannon Car Payment', icon: '🚗', kind: 'expense' });
+      putSeed('cats', { id: 'tr-car-s', group: 'g-tr', sub: 'Car Payment', name: 'Shannon Car Payment', icon: '🚗', kind: 'expense' });
     put('kv', { id: 'migrations', v: 1 });
   }
   if (cur < 2){
     // v4.2 — Paycheck and Seed Money split per person (Jason / Shannon).
     setCat('inc-pay', { name: 'Jason Paycheck', sub: 'Paycheck' });
     if (!DATA.cats['inc-pay-s'])
-      put('cats', { id: 'inc-pay-s', group: 'g-inc', sub: 'Paycheck', name: 'Shannon Paycheck', icon: '💵', kind: 'income' });
+      putSeed('cats', { id: 'inc-pay-s', group: 'g-inc', sub: 'Paycheck', name: 'Shannon Paycheck', icon: '💵', kind: 'income' });
     setCat('inc-seed', { name: 'Jason Seed Money', sub: 'Seed Money' });
     if (!DATA.cats['inc-seed-s'])
-      put('cats', { id: 'inc-seed-s', group: 'g-inc', sub: 'Seed Money', name: 'Shannon Seed Money', icon: '🏦', kind: 'income', oneTime: true });
+      putSeed('cats', { id: 'inc-seed-s', group: 'g-inc', sub: 'Seed Money', name: 'Shannon Seed Money', icon: '🏦', kind: 'income', oneTime: true });
     put('kv', { id: 'migrations', v: 2 });
   }
   if (cur < 3){
@@ -3523,9 +3535,23 @@ function renderCatsScreen(c){
       '<div class="t2">→ ' + esc(catLabel(r.cat).name) + '</div></div>' +
       '<button class="btn btn-sm" data-rdel="' + esc(r.id) + '">×</button></div>').join('') +
     '<button class="btn btn-sm btn-block" data-x="radd" style="margin-top:8px">＋ Add rule</button></div>';
+
+  // Archived categories — hidden from pickers but restorable.
+  const archived = Object.values(DATA.cats).filter((c2) => c2.deleted).sort((a, b) => ((a.name || '') < (b.name || '') ? -1 : 1));
+  if (archived.length){
+    html += '<div class="card"><h3>Archived (' + archived.length + ')</h3>' +
+      '<p class="tiny" style="margin:0 0 6px">Hidden from pickers; past transactions keep them. Unarchive to bring one back.</p>' +
+      archived.map((c2) => '<div class="list-item" style="cursor:default"><span class="ic">' + esc(c2.icon || '•') + '</span>' +
+        '<div class="body"><div class="t1">' + esc(c2.name || c2.id) + '</div><div class="t2">' + esc(c2.kind || 'expense') + '</div></div>' +
+        '<button class="btn btn-sm" data-unarch="' + esc(c2.id) + '">Unarchive</button></div>').join('') + '</div>';
+  }
+
   c.innerHTML = html;
 
   const rerender = () => renderCatsScreen(c);
+  c.querySelectorAll('[data-unarch]').forEach((b) => {
+    b.onclick = () => { const cc = DATA.cats[b.dataset.unarch]; if (cc){ cc.deleted = false; put('cats', cc); } renderCatsScreen(c); toast('Category restored'); };
+  });
   const toggle = (k) => { if (CATS_OPEN.has(k)) CATS_OPEN.delete(k); else CATS_OPEN.add(k); rerender(); };
   c.querySelectorAll('[data-gtog]').forEach((row) => {
     row.onclick = (e) => { if (e.target.closest('[data-gadd]')) return; toggle('g:' + row.dataset.gtog); };
