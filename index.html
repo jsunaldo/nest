@@ -250,7 +250,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v4.0'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v4.1'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1570,6 +1570,7 @@ function openTxnEditor(id){
     if (!(await confirmDlg('Flip this from money ' + (t.amt > 0 ? 'IN to money OUT' : 'OUT to money IN') +
       '? Use this only when the bank imported the amount in the wrong direction.', 'Flip'))) return;
     t.amt = -t.amt;
+    if (t.btc) t.btc = -t.btc; // BTC follows the cash direction
     if (t.splits) t.splits = t.splits.map((p) => ({ cat: p.cat, amt: -p.amt, note: p.note }));
     put('txns', t); m.close(); renderCurrent(); toast('Direction flipped');
   };
@@ -2209,6 +2210,7 @@ function renderVerifyMode(c){
   };
   q('[data-x=flip]').onclick = () => {
     t.amt = -t.amt;
+    if (t.btc) t.btc = -t.btc; // BTC follows the cash direction
     if (t.splits) t.splits = t.splits.map((p) => ({ cat: p.cat, amt: -p.amt, note: p.note }));
     put('txns', t); renderVerifyMode(c); toast('Direction flipped');
   };
