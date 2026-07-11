@@ -298,7 +298,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v7.6'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v7.7'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -3777,7 +3777,24 @@ function renderRecurringScreen(c){
   const nowCm = new Date().getMonth() + 1;
   const mbmOpen = RECUR_OPEN.has('mbm');
 
-  let html = '<div class="card">' +
+  // Warn about expense categories that look like credit-card payments or account-to-account
+  // transfers: counting them as spending double-counts the actual charges tracked on the card.
+  // One tap converts them to a Transfer (excluded from the total, shown under Recurring transfers).
+  const CC_XFER_RE = /(credit[ -]?card|card (payment|pmt|pmnt)|cc (payment|pmt)|\btransfer\b|autopay|pay ?off)/i;
+  const dblSuspects = catIds.filter((cid) => CC_XFER_RE.test(catLabel(cid).name || ''));
+  let warn = '';
+  if (dblSuspects.length){
+    warn = '<div class="card" style="border-color:var(--status-warn);background:rgba(240,200,90,.06)">' +
+      '<div class="row" style="align-items:flex-start;gap:8px"><span style="font-size:20px">⚠️</span>' +
+      '<div class="grow"><b>Possible double-count</b>' +
+      '<p class="tiny" style="margin:4px 0 8px">These look like credit-card payments or transfers between your own accounts. Counting them as spending double-counts the charges you already track on the card. Mark each as a <b>Transfer</b> to drop it from this total — it moves to “Recurring transfers” below.</p></div></div>' +
+      dblSuspects.map((cid) => '<div class="list-item" style="cursor:default"><span class="ic">' + catLabel(cid).icon + '</span>' +
+        '<div class="body"><div class="t1">' + esc(catLabel(cid).name) + '</div><div class="t2">' + fmt$(catTotal(cid)) + '/mo counted as spending</div></div>' +
+        '<button class="btn btn-sm" data-cctransfer="' + esc(cid) + '">Mark transfer</button></div>').join('') +
+      '</div>';
+  }
+
+  let html = warn + '<div class="card">' +
     '<div class="tree-row grp" data-rtog="mbm" style="cursor:pointer"><span class="ic">📅</span>' +
     '<div class="body"><div class="t1">Annualized average recurring</div>' +
     '<div class="t2">every ongoing category, averaged per month · tap for month-by-month</div></div>' +
@@ -3838,6 +3855,10 @@ function renderRecurringScreen(c){
   });
   c.querySelectorAll('[data-catedit]').forEach((row) => {
     row.onclick = () => openCatEditor(row.dataset.catedit, () => renderRecurringScreen(c));
+  });
+  c.querySelectorAll('[data-cctransfer]').forEach((b) => {
+    b.onclick = () => { const cat = DATA.cats[b.dataset.cctransfer];
+      if (cat){ cat.kind = 'transfer'; put('cats', cat); toast('Marked as transfer — dropped from spending totals'); renderRecurringScreen(c); } };
   });
 }
 
