@@ -124,12 +124,18 @@ label.fld span{display:block; font-size:12px; color:var(--dim); margin-bottom:4p
   align-items:flex-end; justify-content:center}
 @media(min-width:600px){#modal-root .overlay{align-items:center}}
 #modal-root .sheet{background:var(--card); border:1px solid var(--line); border-radius:20px 20px 0 0;
-  width:100%; max-width:640px; max-height:86vh; overflow-y:auto; padding:18px 18px calc(18px + env(safe-area-inset-bottom))}
+  width:100%; max-width:640px; max-height:86vh; overflow-y:auto; overscroll-behavior:contain;
+  padding:18px 18px calc(18px + env(safe-area-inset-bottom))}
+/* while a popup is open, freeze the page behind it so a scroll gesture stays in the sheet */
+html.modal-open, html.modal-open body{overflow:hidden; height:100%}
 @media(min-width:600px){#modal-root .sheet{border-radius:20px}}
 #modal-root .sheet h3{font-size:17px; margin-bottom:14px; color:var(--text); text-transform:none; letter-spacing:0}
 .modal-closebar{position:sticky; top:0; z-index:8; margin:-18px -18px 10px -18px; padding:12px 18px 10px;
   background:var(--card); border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between}
 .modal-closebar b{font-size:15px}
+/* the closebar's negative top margin (full-bleed header) pulls the next row up under the
+   sticky bar — give the year-nav that immediately follows room to clear it */
+.modal-closebar + .month-nav{margin-top:30px}
 #toast-root{position:fixed; bottom:calc(var(--nav-h) + 10px); left:0; right:0; z-index:70;
   display:flex; flex-direction:column; align-items:center; gap:8px; pointer-events:none}
 .toast{background:var(--card2); border:1px solid var(--line); color:var(--text); border-radius:12px;
@@ -223,6 +229,10 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 .tree-row .body .t1{font-weight:600; font-size:14px}
 .tree-row.grp .body .t1{font-weight:700}
 .tree-row .chev{color:var(--faint); width:18px; text-align:center; flex-shrink:0; font-size:12px}
+/* interactive expand/collapse control — a clear tappable button, not a tiny caret */
+.tree-row .chev.tog{color:var(--dim); width:30px; height:30px; font-size:15px; display:flex; align-items:center;
+  justify-content:center; border-radius:8px; background:var(--card2); border:1px solid var(--line); margin-left:2px; cursor:pointer}
+.tree-row .chev.tog:active{background:var(--line); color:var(--text)}
 .tree-act{color:var(--accent); font-size:17px; padding:2px 6px; flex-shrink:0; cursor:pointer}
 .tree-l1{margin-left:6px; border-left:2px solid var(--line); padding-left:12px}
 .tree-l2{margin-left:14px; border-left:2px solid var(--line); padding-left:16px}
@@ -269,7 +279,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v6.4'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v6.5'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1358,8 +1368,11 @@ function modal(title, html, onClose){
   overlay.appendChild(sheet);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
   root.appendChild(overlay);
+  document.documentElement.classList.add('modal-open'); // freeze the page behind the popup
   let closed = false;
-  function close(){ if (closed) return; closed = true; overlay.remove(); if (onClose) onClose(); }
+  function close(){ if (closed) return; closed = true; overlay.remove();
+    if (!root.querySelector('.overlay')) document.documentElement.classList.remove('modal-open'); // last one out unlocks
+    if (onClose) onClose(); }
   return { node: sheet, close };
 }
 function confirmDlg(msg, okLabel){
@@ -2064,14 +2077,17 @@ const BREAKDOWN_OPEN = new Set(); // collapsible breakdown tree: '<pfx>:g:<gid>'
 // and toggles (data-btog); each category leaf carries data-cat for tap-through.
 function groupedCatHTML(spendMap, incomeMap, investMap, opts){
   opts = opts || {}; const pfx = opts.pfx || 'b';
+  // A group row opens its popup on body-tap (data-cmval) and expands on chevron-tap
+  // (data-btog). Pass gid=null for a synthetic roll-up with no popup — then the whole
+  // row just toggles. The chevron carries .tog so it renders as a clear expand button.
   const grpRow = (gid, icon, name, amtStr, color, tog, open) =>
-    '<div class="tree-row grp" data-cmval="g:' + esc(gid) + '" data-btk="' + esc(tog) + '" style="cursor:pointer"><span class="ic">' + icon + '</span>' +
+    '<div class="tree-row grp" ' + (gid ? 'data-cmval="g:' + esc(gid) + '"' : 'data-btog="' + esc(tog) + '"') + ' data-btk="' + esc(tog) + '" style="cursor:pointer"><span class="ic">' + icon + '</span>' +
     '<div class="body"><div class="t1">' + esc(name) + '</div></div><span class="amt" style="color:' + color + '">' + amtStr + '</span>' +
-    '<span class="chev" data-btog="' + esc(tog) + '" style="cursor:pointer;padding:0 3px">' + (open ? '▾' : '▸') + '</span></div>';
+    '<span class="chev tog" data-btog="' + esc(tog) + '">' + (open ? '▾' : '▸') + '</span></div>';
   const subRow = (gid, s, amtStr, open) =>
     '<div class="tree-row tree-l1" data-cmval="sub:' + esc(gid + '|' + s) + '" data-btk="' + esc(pfx + ':sub:' + gid + '|' + s) + '" style="cursor:pointer"><span class="ic">' + subIcon(gid, s) + '</span>' +
     '<div class="body"><div class="t1">' + esc(s) + '</div></div><span class="amt">' + amtStr + '</span>' +
-    '<span class="chev" data-btog="' + esc(pfx + ':sub:' + gid + '|' + s) + '" style="cursor:pointer;padding:0 3px">' + (open ? '▾' : '▸') + '</span></div>';
+    '<span class="chev tog" data-btog="' + esc(pfx + ':sub:' + gid + '|' + s) + '">' + (open ? '▾' : '▸') + '</span></div>';
   const catLeaf = (cid, amtStr, color, lvl) => { const cl = catLabel(cid); return '<div class="tree-row ' + lvl + '" data-cat="' + esc(cid) + '"><span class="ic">' + cl.icon + '</span><div class="body"><div class="t1">' + esc(cl.name) + '</div></div><span class="amt" style="color:' + color + '"><span class="chev"></span>' + amtStr + '</span></div>'; };
   let html = '';
   for (const g of GROUPS){
@@ -2104,7 +2120,7 @@ function groupedCatHTML(spendMap, incomeMap, investMap, opts){
   if (inv.length){
     const t = inv.reduce((s, c) => s + investMap[c], 0);
     const gkey = pfx + ':g:invest', gOpen = BREAKDOWN_OPEN.has(gkey);
-    html += grpRow('📈', 'Invested', fmt$(t), 'var(--blue)', gkey, gOpen);
+    html += grpRow(null, '📈', 'Invested', fmt$(t), 'var(--blue)', gkey, gOpen);
     if (gOpen) for (const c of inv) html += catLeaf(c, fmt$(investMap[c]), 'var(--blue)', 'tree-l1');
   }
   return html;
@@ -2134,9 +2150,6 @@ function renderHome(){
   const yi = yearSeq.indexOf(YEAR_LENS);
   const st = yearStats(agg, YEAR_LENS);
   const baseline = baselineByCat(agg);
-  const rq = reviewTxns();
-  const rqOut = rq.reduce((s, t) => s + (t.amt < 0 ? -t.amt : 0), 0);
-  const rqIn = rq.reduce((s, t) => s + (t.amt > 0 ? t.amt : 0), 0);
 
   let html = '<div class="month-nav"><button data-x="prev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button>' +
     '<select data-x="ysel" class="ynav-sel">' + yearSeq.map((y) => '<option value="' + y + '"' + (y === YEAR_LENS ? ' selected' : '') + '>' + esc(yearLabel(y)) + '</option>').join('') + '</select>' +
@@ -2200,11 +2213,7 @@ function renderHome(){
         ' show <b>negative spending</b> — money-in in a spend category. More → Data health.</p></div>';
   }
 
-  if (rq.length){
-    html += '<div class="card banner-review" data-x="rev"><div class="row"><span style="font-size:20px">🧾</span>' +
-      '<div class="grow"><b>' + rq.length + '</b> transaction' + (rq.length > 1 ? 's' : '') + ' need review' +
-      '<div class="tiny">' + fmt$(rqOut) + ' out · ' + fmt$(rqIn) + ' in — unsorted money sits OUT of every number above until you sort it</div></div><span class="menu-chev">›</span></div></div>';
-  }
+  // (Home review banner removed per user request — the Review tab badge already signals the count.)
 
   if (st.months.length){
     // Default the highlighted month to the latest one WITH data (a partial year now
@@ -2232,7 +2241,7 @@ function renderHome(){
   const gc = groupedCatHTML(st.byCat, st.incomeByCat, st.investByCat, { pfx: 'y' });
   if (gc)
     html += '<div class="card"><h3>' + esc(yearLabel(YEAR_LENS)) + ' by category</h3>' +
-      '<p class="tiny" style="margin:0 0 4px">Tap a group or subcategory to expand · tap a category to open it</p>' +
+      '<p class="tiny" style="margin:0 0 4px">Tap a row to open it · tap the <b>▸</b> button to expand its breakdown</p>' +
       gc + '</div>';
 
   html += '<div class="card"><h3>Month by month</h3>' + st.perMonth.slice().reverse().map((m) =>
@@ -2249,7 +2258,6 @@ function renderHome(){
   c.querySelector('[data-x=next]').onclick = () => { YEAR_LENS = yearSeq[yi + 1]; renderHome(); };
   c.querySelector('[data-x=ysel]').onchange = (e) => { YEAR_LENS = e.target.value; renderHome(); };
   const on = (sel, fn) => { const n2 = c.querySelector(sel); if (n2) n2.onclick = fn; };
-  on('[data-x=rev]', () => showTab('review'));
   on('[data-x=import]', () => openScreen('Import', renderImportScreen));
   on('[data-x=bal]', () => openScreen('Accounts', renderAccountsScreen));
   c.querySelectorAll('[data-aidhome]').forEach((n2) => { n2.onclick = () => openAccountModal(n2.dataset.aidhome); });
