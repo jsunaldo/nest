@@ -183,6 +183,10 @@ table.map-tbl th{color:var(--dim); font-weight:600}
 .filter-selects{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px}
 .filter-selects select{flex:1 1 30%; min-width:104px; padding:8px 10px; font-size:13px; width:auto}
 .filter-selects select.act{border-color:var(--accent)}
+.filt-btn{flex:1 1 30%; min-width:104px; padding:8px 10px; font-size:13px; text-align:left;
+  background:var(--bg); border:1px solid var(--line); border-radius:10px; color:var(--text); cursor:pointer;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.filt-btn.act{border-color:var(--accent)}
 .tag-x{font-size:11px; opacity:.7; margin-left:2px}
 input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 .rule-pat{font-family:ui-monospace,Menlo,monospace; font-size:12px; background:var(--bg);
@@ -250,7 +254,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v4.3'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v4.4'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1437,6 +1441,45 @@ function legacyCopy(s){
 }
 
 /* ---- category picker ---- */
+// Collapsible tree category picker — drill Group ▸ Subcategory ▸ category, instead
+// of one long list. Resolves the picked cat id (null = All), or undefined if
+// dismissed. Used by the Activity category filter.
+function openCatTreePicker(opts){
+  opts = opts || {};
+  return new Promise((resolve) => {
+    let done = false;
+    const open = new Set();
+    if (opts.current && DATA.cats[opts.current]){ const cc = DATA.cats[opts.current]; open.add('g:' + cc.group); if (cc.sub) open.add('sub:' + cc.group + '|' + cc.sub); }
+    const m = modal('Filter by category', '<div data-x="tbody"></div>', () => { if (!done){ done = true; resolve(undefined); } });
+    const body = m.node.querySelector('[data-x=tbody]');
+    const pick = (id) => { done = true; resolve(id); m.close(); };
+    const leaf = (cat, lvl) => { const on = opts.current === cat.id; return '<div class="tree-row ' + lvl + '" data-pick="' + esc(cat.id) + '"><span class="ic">' + esc(cat.icon || '•') + '</span><div class="body"><div class="t1">' + esc(cat.name) + '</div></div><span class="chev">' + (on ? '✓' : '') + '</span></div>'; };
+    function draw(){
+      let html = '<div class="tree-row grp" data-pick="__all"><span class="ic">✳️</span><div class="body"><div class="t1">All categories</div></div><span class="chev">' + (!opts.current ? '✓' : '') + '</span></div>' +
+        '<div class="tree-row grp" data-pick="__uncat"><span class="ic">❓</span><div class="body"><div class="t1">Uncategorized</div></div><span class="chev">' + (opts.current === '__uncat' ? '✓' : '') + '</span></div>';
+      for (const g of GROUPS){
+        if (g.kind === 'system' && !opts.showSystem) continue;
+        const cats = liveCats().filter((c) => c.group === g.id);
+        if (!cats.length) continue;
+        const gkey = 'g:' + g.id, gOpen = open.has(gkey);
+        html += '<div class="tree-row grp" data-tog="' + gkey + '"><span class="ic">' + (g.icon || '📂') + '</span><div class="body"><div class="t1">' + esc(g.name) + '</div></div><span class="chev">' + (gOpen ? '▾' : '▸') + '</span></div>';
+        if (!gOpen) continue;
+        const bySub = {}, direct = [];
+        for (const c of cats){ if (c.sub){ (bySub[c.sub] = bySub[c.sub] || []).push(c); } else direct.push(c); }
+        for (const c of direct) html += leaf(c, 'tree-l1');
+        for (const s in bySub){
+          const skey = 'sub:' + g.id + '|' + s, sOpen = open.has(skey);
+          html += '<div class="tree-row tree-l1" data-tog="' + skey + '"><span class="ic">' + subIcon(g.id, s) + '</span><div class="body"><div class="t1">' + esc(s) + '</div></div><span class="chev">' + (sOpen ? '▾' : '▸') + '</span></div>';
+          if (sOpen) for (const c of bySub[s]) html += leaf(c, 'tree-l2');
+        }
+      }
+      body.innerHTML = html;
+      body.querySelectorAll('[data-tog]').forEach((r) => { r.onclick = () => { const k = r.dataset.tog; if (open.has(k)) open.delete(k); else open.add(k); draw(); }; });
+      body.querySelectorAll('[data-pick]').forEach((r) => { r.onclick = () => pick(r.dataset.pick === '__all' ? null : r.dataset.pick); });
+    }
+    draw();
+  });
+}
 function openCatPicker(opts){
   opts = opts || {};
   return new Promise((resolve) => {
@@ -2392,12 +2435,7 @@ function renderActivity(){
   const years = dataYears();
   const yearOpts = opt('', 'All years', !ACT.year) + years.map((y) => opt(y, y, ACT.year === y)).join('');
   const moOpts = opt('', 'All months', !ACT.mo) + MONTHS.map((nm, i) => opt(String(i + 1).padStart(2, '0'), nm, ACT.mo === String(i + 1).padStart(2, '0'))).join('');
-  let catOpts = opt('', 'All categories', !ACT.cat) + opt('__uncat', '❓ Uncategorized', ACT.cat === '__uncat');
-  for (const g of GROUPS){
-    const cats = liveCats().filter((cat) => cat.group === g.id);
-    if (!cats.length) continue;
-    catOpts += '<optgroup label="' + esc(g.name) + '">' + cats.map((cat) => opt(cat.id, cat.name, ACT.cat === cat.id)).join('') + '</optgroup>';
-  }
+  const catLabelTxt = ACT.cat ? (ACT.cat === '__uncat' ? '❓ Uncategorized' : catLabel(ACT.cat).icon + ' ' + catLabel(ACT.cat).name) : 'All categories';
   const accts = liveAccounts();
   const accOpts = opt('', 'All accounts', !ACT.acct) + accts.map((a) => opt(a.id, a.name, ACT.acct === a.id)).join('');
   const stOpts = opt('', 'Any status', !ACT.status) + opt('review', 'Needs review', ACT.status === 'review') + opt('excluded', 'Excluded', ACT.status === 'excluded');
@@ -2411,7 +2449,7 @@ function renderActivity(){
     '<div class="filter-selects">' +
       sel('fy', ACT.year, yearOpts, ACT.year ? 'act' : '') +
       sel('fmo', ACT.mo, moOpts, ACT.mo ? 'act' : '') +
-      sel('fcat', ACT.cat, catOpts, ACT.cat ? 'act' : '') +
+      '<button class="filt-btn' + (ACT.cat ? ' act' : '') + '" data-x="fcatbtn">' + esc(catLabelTxt) + ' ▾</button>' +
       (accts.length > 1 ? sel('facc', ACT.acct, accOpts, ACT.acct ? 'act' : '') : '') +
       sel('fst', ACT.status, stOpts, ACT.status ? 'act' : '') +
     '</div>' +
@@ -2498,7 +2536,8 @@ function renderActivity(){
   q('[data-x=fadd]').onclick = () => openAddTxn(ACT.acct);
   q('[data-x=fsel]').onclick = () => { ACT.select = !ACT.select; if (!ACT.select) ACT.sel.clear(); renderActivity(); };
   const bindSel = (x, key) => { const s = q('[data-x=' + x + ']'); if (s) s.onchange = () => { ACT[key] = s.value || null; ACT.limit = 200; renderActivity(); }; };
-  bindSel('fy', 'year'); bindSel('fmo', 'mo'); bindSel('fcat', 'cat'); bindSel('facc', 'acct'); bindSel('fst', 'status');
+  bindSel('fy', 'year'); bindSel('fmo', 'mo'); bindSel('facc', 'acct'); bindSel('fst', 'status');
+  q('[data-x=fcatbtn]').onclick = () => openCatTreePicker({ current: ACT.cat, showSystem: true }).then((picked) => { if (picked !== undefined){ ACT.cat = picked; ACT.limit = 200; renderActivity(); } });
   const fclear = q('[data-x=fclear]');
   if (fclear) fclear.onclick = () => { ACT.year = ACT.mo = ACT.cat = ACT.acct = ACT.status = null; ACT.limit = 200; renderActivity(); };
   drawList();
