@@ -259,7 +259,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v5.9'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v6.0'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -925,13 +925,10 @@ const EMPTY_AGG = { spend: {}, income: {}, invest: {}, spendTotal: 0, incomeTota
 function yearStats(agg, year){
   agg = agg || buildMonthAgg();
   const cur = currentYM();
-  // 'all' → every month with data (the "Overall" lens). A specific year → the full
-  // Jan–Dec calendar (empty months render as $0), so a partial year always shows the
-  // whole axis. fullMonths stays REAL data months only, so averages don't get diluted.
-  const months = (year === 'all')
-    ? Object.keys(agg).sort()
-    : Array.from({ length: 12 }, (_, i) => year + '-' + String(i + 1).padStart(2, '0'));
-  const st = { year, months, fullMonths: months.filter((ym) => ym < cur && agg[ym]),
+  // Only months with real activity (first → last), never padded to a full calendar —
+  // so a partial year shows its actual data range, not empty leading/trailing months.
+  const months = (year === 'all' ? Object.keys(agg) : Object.keys(agg).filter((ym) => ym.slice(0, 4) === year)).sort();
+  const st = { year, months, fullMonths: months.filter((ym) => ym < cur),
                spend: 0, income: 0, invest: 0, oneTime: 0, incomeRecur: 0, spendOneTimeAgg: 0,
                byCat: {}, incomeByCat: {}, investByCat: {}, perMonth: [] };
   for (const ym of months){
@@ -1479,18 +1476,21 @@ function accountBalanceSeries(acct, year){
   if (anchored){ const aym = acct.anchorDate.slice(0, 7); if (!minYM || aym < minYM) minYM = aym; }
   if (!minYM) return { pts: [], anchored };
   const cur = currentYM();
-  let maxKnown = maxYM && maxYM > cur ? maxYM : cur; // balance is known through today (or last dated txn)
-  // A specific year always spans Jan–Dec; 'all' spans first activity → latest month.
-  // Months outside the known range [minYM, maxKnown] get bal:null (a gap, not a
-  // fabricated flat line). balAt is absolute when anchored, else cumulative from 0.
-  const axis = (year && year !== 'all')
-    ? Array.from({ length: 12 }, (_, i) => year + '-' + String(i + 1).padStart(2, '0'))
-    : (() => { const a = []; for (let y = minYM; y <= maxKnown; y = shiftYM(y, 1)){ a.push(y); if (a.length > 600) break; } return a; })();
+  const maxKnown = maxYM && maxYM > cur ? maxYM : cur; // balance is known through today (or last dated txn)
+  // Real range only: first month (the account's opening / first activity) → last
+  // known month. Scoped to a year, that's the year's slice — so a year in which the
+  // account was opened starts at the opening month with the opening balance.
+  const months = []; for (let y = minYM; y <= maxKnown; y = shiftYM(y, 1)){ months.push(y); if (months.length > 600) break; }
   const cumAt = (ym) => { let r = 0; for (const k in monthly) if (k <= ym) r += monthly[k]; return r; };
-  const pts = axis.map((ym) => {
-    if (ym < minYM || ym > maxKnown) return { ym, bal: null };
-    return { ym, bal: anchored ? accountBalanceAt(acct, ym + '-31') : cumAt(ym) };
-  });
+  let pts = months.map((ym) => ({ ym, bal: anchored ? accountBalanceAt(acct, ym + '-31') : cumAt(ym) }));
+  if (year && year !== 'all'){
+    // Clamp to the year's activity range: first activity month (or the account's
+    // opening if it opened that year) → last activity month. No leading carry-in.
+    let lo = null, hi = null;
+    for (const k in monthly){ if (k.slice(0, 4) !== year) continue; if (!lo || k < lo) lo = k; if (!hi || k > hi) hi = k; }
+    if (anchored){ const aym = acct.anchorDate.slice(0, 7); if (aym.slice(0, 4) === year && (!lo || aym < lo)) lo = aym; }
+    pts = lo ? pts.filter((p) => p.ym >= lo && p.ym <= (hi && hi >= lo ? hi : lo)) : pts.filter((p) => p.ym.slice(0, 4) === year);
+  }
   return { pts, anchored };
 }
 // Net worth over time across ALL accounts: for each month, sum of every anchored
@@ -1507,24 +1507,29 @@ function combinedBalanceSeries(year){
   for (const a of anchoredAccts){ const ym = a.anchorDate.slice(0, 7); if (!minYM || ym < minYM) minYM = ym; }
   if (!minYM) return { pts: [], anchored: valued };
   const maxKnown = currentYM(); // net worth is known through today, not the future
-  // A specific year always spans Jan–Dec; months outside [minYM, today] are null
-  // (a gap on the line), never a fabricated flat value.
-  const axis = (year && year !== 'all')
-    ? Array.from({ length: 12 }, (_, i) => year + '-' + String(i + 1).padStart(2, '0'))
-    : (() => { const a = []; for (let y = minYM; y <= maxKnown; y = shiftYM(y, 1)){ a.push(y); if (a.length > 600) break; } return a; })();
+  // Real range only (first activity / account opening → today); scoped to a year
+  // that's the year's slice, so a year an account opened in starts at the opening.
+  const months = []; for (let y = minYM; y <= maxKnown; y = shiftYM(y, 1)){ months.push(y); if (months.length > 600) break; }
   const btcMaps = {};
   if (valued) for (const a of btcAccts){ const m = {}; for (const p of btcSeries(a.id, 'all').pts) m[p.ym] = p.value; btcMaps[a.id] = m; }
   const monthly = {};
   if (!valued) for (const t of liveTxns()){ if (!t.date) continue; const ym = t.date.slice(0, 7); monthly[ym] = (monthly[ym] || 0) + t.amt; }
   const cumAt = (ym) => { let r = 0; for (const k in monthly) if (k <= ym) r += monthly[k]; return r; };
-  const pts = axis.map((ym) => {
-    if (ym < minYM || ym > maxKnown) return { ym, bal: null };
+  let pts = months.map((ym) => {
     if (!valued) return { ym, bal: cumAt(ym) };
     const eom = ym + '-31'; let total = 0;
     for (const a of anchoredAccts) total += (accountBalanceAt(a, eom) || 0);
     for (const a of btcAccts){ const v = btcMaps[a.id][ym]; if (v != null) total += v; }
     return { ym, bal: total };
   });
+  if (year && year !== 'all'){
+    // Clamp to the year's activity range: first activity month (or an account opening
+    // that year) → last activity month, so it aligns with the spending charts.
+    let lo = null, hi = null;
+    for (const t of liveTxns()){ if (!t.date || t.date.slice(0, 4) !== year) continue; const ym = t.date.slice(0, 7); if (!lo || ym < lo) lo = ym; if (!hi || ym > hi) hi = ym; }
+    for (const a of anchoredAccts){ const aym = a.anchorDate.slice(0, 7); if (aym.slice(0, 4) === year && (!lo || aym < lo)) lo = aym; }
+    pts = lo ? pts.filter((p) => p.ym >= lo && p.ym <= (hi && hi >= lo ? hi : lo)) : pts.filter((p) => p.ym.slice(0, 4) === year);
+  }
   return { pts, anchored: valued };
 }
 const ACCT_TYPES = [['checking', 'Checking'], ['savings', 'Savings'], ['investment', 'Investment'], ['btc', 'Bitcoin Investment'], ['credit', 'Credit card']];
@@ -1585,22 +1590,18 @@ function btcSeries(acctId, year){
     return anchors[anchors.length - 1].price;
   };
   const firstYM = txns[0].date.slice(0, 7), curYM = currentYM();
-  // A specific year always spans Jan–Dec (holdings carry in from prior years; months
-  // before the first buy are 0, and FUTURE months are null gaps). 'all' spans first
-  // buy → today.
-  const axis = (year && year !== 'all')
-    ? Array.from({ length: 12 }, (_, i) => year + '-' + String(i + 1).padStart(2, '0'))
-    : (() => { const a = []; for (let y = firstYM; y <= curYM; y = shiftYM(y, 1)){ a.push(y); if (a.length > 600) break; } return a; })();
+  // Real range: first buy → today; scoped to a year that's the year's slice (holdings
+  // carry in from prior years).
+  const months = []; for (let y = firstYM; y <= curYM; y = shiftYM(y, 1)){ months.push(y); if (months.length > 600) break; }
   let sats = 0, invested = 0, ti = 0;
-  const pts = axis.map((ym) => {
-    if (ym > curYM) return { ym, sats: null, btc: null, invested: null, price: null, value: null };
+  const pts = months.map((ym) => {
     const cutoff = ym + '-31';
     while (ti < txns.length && txns[ti].date <= cutoff){ sats += txns[ti].btc || 0; invested += txns[ti].amt || 0; ti++; }
     const price = priceAt(dnum(cutoff));
     const value = price != null && sats > 0 ? Math.round((sats / 1e8) * price) : (sats > 0 ? null : 0);
     return { ym, sats, btc: sats / 1e8, invested, price, value };
   });
-  return { pts };
+  return { pts: (year && year !== 'all') ? pts.filter((p) => p.ym.slice(0, 4) === year) : pts };
 }
 const fmtBtc = (sats) => (sats / 1e8).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 8 }) + ' ₿';
 function acctTypeLabel(t){ const e = ACCT_TYPES.find((x) => x[0] === t); return e ? e[1] : (t || ''); }
