@@ -251,6 +251,11 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 /* clickable chart legend (toggle a series on/off) */
 .legend.legend-toggle span{cursor:pointer; user-select:none; padding:2px 4px; border-radius:6px}
 .legend.legend-toggle span.off{opacity:.4; text-decoration:line-through}
+/* per-month toggle chips under the spending-vs-income chart */
+.month-chips{display:flex; flex-wrap:wrap; gap:6px; margin-top:10px}
+.month-chips .mchip{font-size:12px; font-weight:600; padding:4px 10px; border-radius:999px; border:1px solid var(--line);
+  background:var(--card2); color:var(--dim); cursor:pointer; user-select:none; white-space:nowrap}
+.month-chips .mchip.off{opacity:.45; text-decoration:line-through}
 /* gift registry rows */
 .gift-row .gift-thx{cursor:pointer; font-size:18px; opacity:.85}
 .gift-row .gift-thx.on{opacity:1}
@@ -307,7 +312,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v7.9'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v7.10'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1485,6 +1490,7 @@ let HOME_BL = 'overall'; // Bottom Line lens: overall | recurring | oneoff
 let YEAR_LENS = 'all';   // ONE shared year lens (Home + account popup): 'all' (Overall) or a 'YYYY'
 const HOME_OFF = new Set(); // account ids UNCHECKED on Home — excluded from its charts/data
 const SVI_ON = { rs: true, os: true, ri: true, oi: true }; // Spending-vs-income legend toggles
+const MONTH_OFF = new Set(); // 'YYYY-MM' months toggled OFF in the Spending-vs-income chart
 // Does a txn's account pass a filter? filter = null (all) | id string | Set/array of ids.
 function acctMatch(f, id){ if (!f) return true; if (typeof f === 'string') return id === f; if (f instanceof Set) return f.has(id); if (Array.isArray(f)) return f.indexOf(id) >= 0; return true; }
 const yearLabel = (y) => (y === 'all' ? 'Overall' : y);
@@ -2368,6 +2374,7 @@ function renderHome(){
     renderHome();
   }; });
   c.querySelectorAll('[data-svi]').forEach((n2) => { n2.onclick = () => { SVI_ON[n2.dataset.svi] = !SVI_ON[n2.dataset.svi]; renderHome(); }; });
+  c.querySelectorAll('[data-mtog]').forEach((n2) => { n2.onclick = () => { const m = n2.dataset.mtog; if (MONTH_OFF.has(m)) MONTH_OFF.delete(m); else MONTH_OFF.add(m); renderHome(); }; });
   // Category leaf (data-cat) and group/subcategory branch (data-cmval) both open a
   // scoped popup; the chevron (data-btog) expands/collapses the branch in place.
   c.querySelectorAll('[data-cat]').forEach((n2) => { n2.onclick = () => openCategoryModal(n2.dataset.cat); });
@@ -3447,6 +3454,9 @@ function miniLineChart(months, series, fmtV, opts){
 function yearChartsHTML(agg, months, sel, baseline){
   // Pad so empty months (a partial year still shows Jan–Dec) read as $0, not crash.
   const src = agg; agg = {}; for (const ym of months) agg[ym] = src[ym] || EMPTY_AGG;
+  const allM = months.slice();              // every month in the lens — drives the toggle chips
+  months = months.filter((m) => !MONTH_OFF.has(m)); // months actually drawn
+  if (!months.length) months = allM.slice(); // never blank the chart entirely
   const si = months.indexOf(sel);
   const n = months.length;
   const padT = 16, padB = 22, padL = 6, padR = 6;
@@ -3520,10 +3530,12 @@ function yearChartsHTML(agg, months, sel, baseline){
     avgSp > 0 ? { c: 'var(--viz-1)', label: 'avg out ' + fmt$(avgSp) } : null,
     avgIn > 0 ? { c: 'var(--viz-2)', label: 'avg in ' + fmt$(avgIn) } : null,
     showBudget ? { c: 'var(--faint)', label: 'budget ' + fmt$(baseline.total) } : null ]);
-  const sA = agg[sel];
-  const net = sA.incomeTotal - sA.spendTotal;
-  const sRecur = sA.spendTotal - sA.spendOneTime, sOne = sA.spendOneTime;
-  const iRecur = sA.incomeRecur, iOne = sA.incomeTotal - sA.incomeRecur;
+  // Per-month toggle chips (drive MONTH_OFF): tap to drop a month from the bars, scale and averages.
+  const multiYr = new Set(allM.map((m) => m.slice(0, 4))).size > 1;
+  const mchips = allM.length > 1
+    ? '<div class="month-chips">' + allM.map((ym) => '<span class="mchip' + (MONTH_OFF.has(ym) ? ' off' : '') + '" data-mtog="' + ym + '">' +
+        esc(fmtMonth(ym).slice(0, 3) + (multiYr ? ' ’' + ym.slice(2, 4) : '')) + '</span>').join('') + '</div>'
+    : '';
   const card1 =
     '<div class="card"><h3>Spending vs income</h3>' +
     '<div class="chart-wrap"><svg viewBox="0 0 ' + W1 + ' ' + H1 + '" width="100%" xmlns="http://www.w3.org/2000/svg">' + s1 + '</svg></div>' +
@@ -3531,8 +3543,8 @@ function yearChartsHTML(agg, months, sel, baseline){
       '<span data-svi="rs"' + (SVI_ON.rs ? '' : ' class="off"') + '><i style="background:var(--viz-1)"></i>Recurring spend</span>' +
       '<span data-svi="os"' + (SVI_ON.os ? '' : ' class="off"') + '><i style="background:var(--viz-1);opacity:.5"></i>One-time spend</span>' +
       '<span data-svi="ri"' + (SVI_ON.ri ? '' : ' class="off"') + '><i style="background:var(--viz-2)"></i>Recurring income</span>' +
-      '<span data-svi="oi"' + (SVI_ON.oi ? '' : ' class="off"') + '><i style="background:var(--viz-2);opacity:.5"></i>One-off income</span></div>' + refs1 +
-    '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Tap a legend item to show/hide it · tap a bar to open that month.</span></div></div>';
+      '<span data-svi="oi"' + (SVI_ON.oi ? '' : ' class="off"') + '><i style="background:var(--viz-2);opacity:.5"></i>One-off income</span></div>' + refs1 + mchips +
+    '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Tap a legend item or month to show/hide it · tap a bar to open that month.</span></div></div>';
 
   return card1;
 }
