@@ -242,6 +242,15 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 .row-btn{background:var(--card2); border:1px solid var(--line); color:var(--text); border-radius:999px;
   font-size:12px; font-weight:600; padding:5px 11px; margin:0 8px; cursor:pointer; flex-shrink:0; white-space:nowrap}
 .row-btn:active{background:var(--line)}
+/* Home account checkboxes (filter charts) */
+.acct-check{width:24px; height:24px; border-radius:7px; border:1.5px solid var(--line); background:var(--card2);
+  display:inline-flex; align-items:center; justify-content:center; font-size:14px; font-weight:800; color:var(--accent); cursor:pointer; flex-shrink:0}
+.acct-check.on{border-color:var(--accent); background:rgba(240,200,90,.15)}
+.list-item.acct-off{opacity:.55}
+.list-item.acct-off .amt{text-decoration:line-through}
+/* clickable chart legend (toggle a series on/off) */
+.legend.legend-toggle span{cursor:pointer; user-select:none; padding:2px 4px; border-radius:6px}
+.legend.legend-toggle span.off{opacity:.4; text-decoration:line-through}
 /* gift registry rows */
 .gift-row .gift-thx{cursor:pointer; font-size:18px; opacity:.85}
 .gift-row .gift-thx.on{opacity:1}
@@ -298,7 +307,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v7.7'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v7.8'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -869,11 +878,11 @@ function txnProjects(t, catId){
 // Category is kept out of baseline/budget suggestions (natural-month math).
 function catExcludedFromEstimates(c){ return catIsOneTime(c); }
 // {ym: {spend: {catId: cents}, spendTotal, incomeTotal}} across all live, non-excluded txns.
-function buildMonthAgg(acctId){
+function buildMonthAgg(acctFilter){
   const out = {};
   for (const t of liveTxns()){
     if (t.status === 'excluded') continue;
-    if (acctId && t.acct !== acctId) continue;
+    if (acctFilter && !acctMatch(acctFilter, t.acct)) continue;
     const ym = ymOf(t.date);
     const bucket = out[ym] || (out[ym] = { spend: {}, income: {}, invest: {}, spendTotal: 0, incomeTotal: 0, investTotal: 0,
                                            incomeRecur: 0, spendOneTime: 0 });
@@ -1474,6 +1483,10 @@ const REVIEW_SKIP = new Set();
 const REVIEW = { mode: 'sort', month: null, acct: null }; // Review tab: auto-sort queue vs manual verify pass
 let HOME_BL = 'overall'; // Bottom Line lens: overall | recurring | oneoff
 let YEAR_LENS = 'all';   // ONE shared year lens (Home + account popup): 'all' (Overall) or a 'YYYY'
+const HOME_OFF = new Set(); // account ids UNCHECKED on Home — excluded from its charts/data
+const SVI_ON = { rs: true, os: true, ri: true, oi: true }; // Spending-vs-income legend toggles
+// Does a txn's account pass a filter? filter = null (all) | id string | Set/array of ids.
+function acctMatch(f, id){ if (!f) return true; if (typeof f === 'string') return id === f; if (f instanceof Set) return f.has(id); if (Array.isArray(f)) return f.indexOf(id) >= 0; return true; }
 const yearLabel = (y) => (y === 'all' ? 'Overall' : y);
 // Every year that appears anywhere in the data (ascending) — the year-nav option set.
 function dataYearList(){ return Array.from(new Set(liveTxns().map((t) => ymOf(t.date).slice(0, 4)))).sort(); }
@@ -1555,8 +1568,8 @@ function accountBalanceSeries(acct, year){
 // cash/credit account's balance + every Bitcoin account's $ value (via its price
 // curve). If nothing is anchored/valued, falls back to cumulative net flow from 0
 // (shape only). `anchored` = the total is real money, not a from-zero shape.
-function combinedBalanceSeries(year){
-  const accts = liveAccounts();
+function combinedBalanceSeries(year, acctFilter){
+  const accts = liveAccounts().filter((a) => acctMatch(acctFilter, a.id));
   const anchoredAccts = accts.filter((a) => a.type !== 'btc' && a.anchorBal != null && a.anchorDate);
   const btcAccts = accts.filter((a) => a.type === 'btc');
   const valued = anchoredAccts.length > 0 || btcAccts.length > 0;
@@ -1567,7 +1580,7 @@ function combinedBalanceSeries(year){
     for (const a of anchoredAccts){ const ym = a.anchorDate.slice(0, 7); if (!minYM || ym < minYM) minYM = ym; }
     for (const a of btcAccts){ for (const id in DATA.txns){ const t = DATA.txns[id]; if (t.deleted || t.acct !== a.id || !t.date) continue; const ym = t.date.slice(0, 7); if (!minYM || ym < minYM) minYM = ym; } }
   } else {
-    for (const t of liveTxns()){ if (!t.date) continue; const ym = t.date.slice(0, 7); if (!minYM || ym < minYM) minYM = ym; }
+    for (const t of liveTxns()){ if (!t.date || !acctMatch(acctFilter, t.acct)) continue; const ym = t.date.slice(0, 7); if (!minYM || ym < minYM) minYM = ym; }
   }
   if (!minYM) return { pts: [], anchored: valued };
   const maxKnown = currentYM(); // net worth is known through today, not the future
@@ -1577,7 +1590,7 @@ function combinedBalanceSeries(year){
   const btcMaps = {};
   if (valued) for (const a of btcAccts){ const m = {}; for (const p of btcSeries(a.id, 'all').pts) m[p.ym] = p.value; btcMaps[a.id] = m; }
   const monthly = {};
-  if (!valued) for (const t of liveTxns()){ if (!t.date) continue; const ym = t.date.slice(0, 7); monthly[ym] = (monthly[ym] || 0) + t.amt; }
+  if (!valued) for (const t of liveTxns()){ if (!t.date || !acctMatch(acctFilter, t.acct)) continue; const ym = t.date.slice(0, 7); monthly[ym] = (monthly[ym] || 0) + t.amt; }
   const cumAt = (ym) => { let r = 0; for (const k in monthly) if (k <= ym) r += monthly[k]; return r; };
   let pts = months.map((ym) => {
     if (!valued) return { ym, bal: cumAt(ym) };
@@ -2220,7 +2233,10 @@ function renderHome(){
     c.querySelector('[data-x=import]').onclick = () => openScreen('Import', renderImportScreen);
     return;
   }
-  const agg = buildMonthAgg();
+  // Home account filter: only CHECKED accounts feed the charts/data below.
+  for (const id of [...HOME_OFF]) if (!DATA.accounts[id] || DATA.accounts[id].deleted) HOME_OFF.delete(id);
+  const acctFilter = HOME_OFF.size ? new Set(liveAccounts().filter((a) => !HOME_OFF.has(a.id)).map((a) => a.id)) : null;
+  const agg = buildMonthAgg(acctFilter);
   // Year lens: 'all' (Overall) is the default; arrows/dropdown step through it + each year.
   // Options are the GLOBAL year set so the shared lens is always valid across views.
   const years = dataYearList();
@@ -2241,15 +2257,21 @@ function renderHome(){
     if (accts.length){
       if (accts.some((a) => a.type === 'btc')) refreshBtcPrice().then((r) => { if (r.changed && CURRENT_TAB === "home") renderHome(); });
       const dispBal = (a) => a.type === 'btc' ? btcStats(a.id).value : accountBalance(a);
+      const on = (a) => !HOME_OFF.has(a.id);
       let net = 0, anyBal = false;
-      for (const a of accts){ const b = dispBal(a); if (b != null){ net += b; anyBal = true; } }
+      for (const a of accts){ if (!on(a)) continue; const b = dispBal(a); if (b != null){ net += b; anyBal = true; } }
+      const nShown = accts.filter(on).length;
       html += '<div class="card"><div class="row" style="margin-bottom:8px"><span style="font-size:15px" class="grow"><b>Accounts</b>' +
-        (anyBal ? ' — <b>' + fmt$(net) + '</b> net' : '') + '</span>' +
+        (anyBal ? ' — <b>' + fmt$(net) + '</b> net' : '') +
+        (HOME_OFF.size ? ' <span class="tiny" style="color:var(--dim)">· ' + nShown + ' of ' + accts.length + ' shown</span>' : '') + '</span>' +
         '<a data-x="bal" style="cursor:pointer;font-size:13px">manage ›</a></div>' +
+        (accts.length > 1 ? '<p class="tiny" style="margin:-2px 0 8px;color:var(--faint)">Uncheck an account to leave it out of the charts below.</p>' : '') +
         accts.map((a) => {
-          const bal = dispBal(a);
+          const bal = dispBal(a), checked = on(a);
           const sub = a.type === 'btc' ? fmtBtc(btcStats(a.id).sats) : esc(acctTypeLabel(a.type));
-          return '<div class="list-item" data-aidhome="' + esc(a.id) + '"><span class="ic">' + acctIcon(a.type) + '</span>' +
+          return '<div class="list-item acct-row' + (checked ? '' : ' acct-off') + '" data-aidhome="' + esc(a.id) + '" style="cursor:pointer">' +
+            '<span class="acct-check' + (checked ? ' on' : '') + '" data-aichk="' + esc(a.id) + '" title="Show on Home">' + (checked ? '✓' : '') + '</span>' +
+            '<span class="ic">' + acctIcon(a.type) + '</span>' +
             '<div class="body"><div class="t1">' + esc(a.name) + '</div><div class="t2">' + sub + '</div></div>' +
             (bal == null ? '<span class="tiny" style="color:var(--accent)">' + (a.type === 'btc' ? 'add BTC ›' : 'set balance ›') + '</span>'
                          : '<span class="amt"' + (bal < 0 ? ' style="color:var(--status-crit)"' : '') + '>' + fmt$(bal) + '</span>') + '</div>';
@@ -2261,7 +2283,7 @@ function renderHome(){
 
   // Balance over time — net worth across ALL accounts (the overall picture).
   {
-    const bser = combinedBalanceSeries(YEAR_LENS), bpts = bser.pts;
+    const bser = combinedBalanceSeries(YEAR_LENS, acctFilter), bpts = bser.pts;
     const bchart = balanceChartHTML(bpts);
     if (bchart){
       // Tiles + trend from the KNOWN points only (a partial year has null gaps).
@@ -2340,6 +2362,12 @@ function renderHome(){
   on('[data-x=import]', () => openScreen('Import', renderImportScreen));
   on('[data-x=bal]', () => openScreen('Accounts', renderAccountsScreen));
   c.querySelectorAll('[data-aidhome]').forEach((n2) => { n2.onclick = () => openAccountModal(n2.dataset.aidhome); });
+  c.querySelectorAll('[data-aichk]').forEach((n2) => { n2.onclick = (e) => {
+    e.stopPropagation(); const id = n2.dataset.aichk;
+    if (HOME_OFF.has(id)) HOME_OFF.delete(id); else HOME_OFF.add(id);
+    renderHome();
+  }; });
+  c.querySelectorAll('[data-svi]').forEach((n2) => { n2.onclick = () => { SVI_ON[n2.dataset.svi] = !SVI_ON[n2.dataset.svi]; renderHome(); }; });
   // Category leaf (data-cat) and group/subcategory branch (data-cmval) both open a
   // scoped popup; the chevron (data-btog) expands/collapses the branch in place.
   c.querySelectorAll('[data-cat]').forEach((n2) => { n2.onclick = () => openCategoryModal(n2.dataset.cat); });
@@ -3423,15 +3451,19 @@ function yearChartsHTML(agg, months, sel, baseline){
   const n = months.length;
   const padT = 16, padB = 22, padL = 6, padR = 6;
 
-  /* -- card 1: spending vs income, grouped bars -- */
+  /* -- card 1: spending vs income, grouped bars. The 4 legend series toggle via SVI_ON. -- */
   const W1 = Math.max(340, n * 42), H1 = 180;
+  // Only the enabled legend series count toward the bars, scale, averages and budget line.
+  const visSp = (a) => (SVI_ON.rs ? Math.max(0, a.spendTotal - a.spendOneTime) : 0) + (SVI_ON.os ? Math.max(0, a.spendOneTime) : 0);
+  const visIn = (a) => (SVI_ON.ri ? Math.max(0, a.incomeRecur) : 0) + (SVI_ON.oi ? Math.max(0, a.incomeTotal - a.incomeRecur) : 0);
+  const showBudget = !!baseline && (SVI_ON.rs || SVI_ON.os);
   // Average monthly out/in over the full (completed) months shown.
   const curYM_ = currentYM(), fullM = months.filter((ym) => ym < curYM_), denomA = Math.max(1, fullM.length);
-  const avgSp = Math.round(fullM.reduce((s, ym) => s + agg[ym].spendTotal, 0) / denomA);
-  const avgIn = Math.round(fullM.reduce((s, ym) => s + agg[ym].incomeTotal, 0) / denomA);
+  const avgSp = Math.round(fullM.reduce((s, ym) => s + visSp(agg[ym]), 0) / denomA);
+  const avgIn = Math.round(fullM.reduce((s, ym) => s + visIn(agg[ym]), 0) / denomA);
   let maxV = 1;
-  for (const ym of months) maxV = Math.max(maxV, agg[ym].spendTotal, agg[ym].incomeTotal);
-  if (baseline) maxV = Math.max(maxV, baseline.total);
+  for (const ym of months) maxV = Math.max(maxV, visSp(agg[ym]), visIn(agg[ym]));
+  if (showBudget) maxV = Math.max(maxV, baseline.total);
   maxV = Math.max(maxV, avgSp, avgIn);
   const colW = (W1 - padL - padR) / n;
   const yS = (v) => padT + (1 - v / maxV) * (H1 - padT - padB);
@@ -3465,8 +3497,8 @@ function yearChartsHTML(agg, months, sel, baseline){
   months.forEach((ym, i) => {
     const cx = padL + i * colW + colW / 2;
     const a = agg[ym], selected = ym === sel;
-    const spendRecur = Math.max(0, a.spendTotal - a.spendOneTime), spendOne = Math.max(0, a.spendOneTime);
-    const incRecur = Math.max(0, a.incomeRecur), incOne = Math.max(0, a.incomeTotal - a.incomeRecur);
+    const spendRecur = SVI_ON.rs ? Math.max(0, a.spendTotal - a.spendOneTime) : 0, spendOne = SVI_ON.os ? Math.max(0, a.spendOneTime) : 0;
+    const incRecur = SVI_ON.ri ? Math.max(0, a.incomeRecur) : 0, incOne = SVI_ON.oi ? Math.max(0, a.incomeTotal - a.incomeRecur) : 0;
     // Full-column hit target FIRST (below), so clicks in empty space still open
     // the month; segments drawn on top own hover + their own clicks.
     s1 += '<rect data-m="' + ym + '" x="' + (padL + i * colW).toFixed(1) + '" y="0" width="' + colW.toFixed(1) + '" height="' + H1 + '" fill="transparent" pointer-events="all" style="cursor:pointer"/>';
@@ -3478,7 +3510,7 @@ function yearChartsHTML(agg, months, sel, baseline){
       s1 += '<rect x="' + (cx - colW / 2 + 3).toFixed(1) + '" y="' + (H1 - padB + 3) + '" width="' + (colW - 6).toFixed(1) + '" height="2" rx="1" fill="var(--accent)" pointer-events="none"/>';
   });
   // Reference lines (values are labelled in the caption below, not over the bars).
-  if (baseline){
+  if (showBudget){
     const by = yS(baseline.total).toFixed(1);
     s1 += '<line x1="' + padL + '" y1="' + by + '" x2="' + (W1 - padR) + '" y2="' + by + '" stroke="var(--faint)" stroke-dasharray="4 3"/>';
   }
@@ -3487,7 +3519,7 @@ function yearChartsHTML(agg, months, sel, baseline){
   const refs1 = chartRefs([
     avgSp > 0 ? { c: 'var(--viz-1)', label: 'avg out ' + fmt$(avgSp) } : null,
     avgIn > 0 ? { c: 'var(--viz-2)', label: 'avg in ' + fmt$(avgIn) } : null,
-    baseline ? { c: 'var(--faint)', label: 'budget ' + fmt$(baseline.total) } : null ]);
+    showBudget ? { c: 'var(--faint)', label: 'budget ' + fmt$(baseline.total) } : null ]);
   const sA = agg[sel];
   const net = sA.incomeTotal - sA.spendTotal;
   const sRecur = sA.spendTotal - sA.spendOneTime, sOne = sA.spendOneTime;
@@ -3495,12 +3527,12 @@ function yearChartsHTML(agg, months, sel, baseline){
   const card1 =
     '<div class="card"><h3>Spending vs income</h3>' +
     '<div class="chart-wrap"><svg viewBox="0 0 ' + W1 + ' ' + H1 + '" width="100%" xmlns="http://www.w3.org/2000/svg">' + s1 + '</svg></div>' +
-    '<div class="legend">' +
-      '<span><i style="background:var(--viz-1)"></i>Recurring spend</span>' +
-      '<span><i style="background:var(--viz-1);opacity:.5"></i>One-time spend</span>' +
-      '<span><i style="background:var(--viz-2)"></i>Recurring income</span>' +
-      '<span><i style="background:var(--viz-2);opacity:.5"></i>One-off income</span></div>' + refs1 +
-    '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Hover a bar segment for detail · tap a bar to open that month.</span></div></div>';
+    '<div class="legend legend-toggle">' +
+      '<span data-svi="rs"' + (SVI_ON.rs ? '' : ' class="off"') + '><i style="background:var(--viz-1)"></i>Recurring spend</span>' +
+      '<span data-svi="os"' + (SVI_ON.os ? '' : ' class="off"') + '><i style="background:var(--viz-1);opacity:.5"></i>One-time spend</span>' +
+      '<span data-svi="ri"' + (SVI_ON.ri ? '' : ' class="off"') + '><i style="background:var(--viz-2)"></i>Recurring income</span>' +
+      '<span data-svi="oi"' + (SVI_ON.oi ? '' : ' class="off"') + '><i style="background:var(--viz-2);opacity:.5"></i>One-off income</span></div>' + refs1 +
+    '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Tap a legend item to show/hide it · tap a bar to open that month.</span></div></div>';
 
   return card1;
 }
