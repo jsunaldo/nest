@@ -259,7 +259,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v6.0'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v6.1'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -2044,14 +2044,14 @@ const BREAKDOWN_OPEN = new Set(); // collapsible breakdown tree: '<pfx>:g:<gid>'
 // and toggles (data-btog); each category leaf carries data-cat for tap-through.
 function groupedCatHTML(spendMap, incomeMap, investMap, opts){
   opts = opts || {}; const pfx = opts.pfx || 'b';
-  const grpRow = (icon, name, amtStr, color, tog, open) =>
-    '<div class="tree-row grp" data-btog="' + esc(tog) + '" style="cursor:pointer"><span class="ic">' + icon + '</span>' +
+  const grpRow = (gid, icon, name, amtStr, color, tog, open) =>
+    '<div class="tree-row grp" data-cmval="g:' + esc(gid) + '" data-btk="' + esc(tog) + '" style="cursor:pointer"><span class="ic">' + icon + '</span>' +
     '<div class="body"><div class="t1">' + esc(name) + '</div></div><span class="amt" style="color:' + color + '">' + amtStr + '</span>' +
-    '<span class="chev">' + (open ? '▾' : '▸') + '</span></div>';
+    '<span class="chev" data-btog="' + esc(tog) + '" style="cursor:pointer;padding:0 3px">' + (open ? '▾' : '▸') + '</span></div>';
   const subRow = (gid, s, amtStr, open) =>
-    '<div class="tree-row tree-l1" data-btog="' + esc(pfx + ':sub:' + gid + '|' + s) + '" style="cursor:pointer"><span class="ic">' + subIcon(gid, s) + '</span>' +
+    '<div class="tree-row tree-l1" data-cmval="sub:' + esc(gid + '|' + s) + '" data-btk="' + esc(pfx + ':sub:' + gid + '|' + s) + '" style="cursor:pointer"><span class="ic">' + subIcon(gid, s) + '</span>' +
     '<div class="body"><div class="t1">' + esc(s) + '</div></div><span class="amt">' + amtStr + '</span>' +
-    '<span class="chev">' + (open ? '▾' : '▸') + '</span></div>';
+    '<span class="chev" data-btog="' + esc(pfx + ':sub:' + gid + '|' + s) + '" style="cursor:pointer;padding:0 3px">' + (open ? '▾' : '▸') + '</span></div>';
   const catLeaf = (cid, amtStr, color, lvl) => { const cl = catLabel(cid); return '<div class="tree-row ' + lvl + '" data-cat="' + esc(cid) + '"><span class="ic">' + cl.icon + '</span><div class="body"><div class="t1">' + esc(cl.name) + '</div></div><span class="amt" style="color:' + color + '"><span class="chev"></span>' + amtStr + '</span></div>'; };
   let html = '';
   for (const g of GROUPS){
@@ -2063,7 +2063,7 @@ function groupedCatHTML(spendMap, incomeMap, investMap, opts){
     if (!cats.length) continue;
     const gTotal = cats.reduce((s, c) => s + src[c], 0);
     const gkey = pfx + ':g:' + g.id, gOpen = BREAKDOWN_OPEN.has(gkey);
-    html += grpRow(g.icon || '📂', g.name, sign + fmt$(gTotal), gcolor, gkey, gOpen);
+    html += grpRow(g.id, g.icon || '📂', g.name, sign + fmt$(gTotal), gcolor, gkey, gOpen);
     if (!gOpen) continue;
     const bySub = {}, direct = [];
     for (const c of cats){ const s = DATA.cats[c].sub; if (s){ (bySub[s] = bySub[s] || []).push(c); } else direct.push(c); }
@@ -2172,49 +2172,13 @@ function renderHome(){
     }
   }
 
-  // Bottom Line lens: overall / recurring / one-off — same tracking read on a
-  // narrowed slice of the money.
-  const incRecur = st.incomeRecur, incOne = st.income - st.incomeRecur;
-  const spRecur = st.spend - st.spendOneTimeAgg, spOne = st.spendOneTimeAgg;
-  const lens = HOME_BL === 'recurring'
-      ? { inc: incRecur, sp: spRecur, label: 'recurring' }
-    : HOME_BL === 'oneoff'
-      ? { inc: incOne, sp: spOne, label: 'one-off' }
-    : { inc: st.income, sp: st.spend, label: 'overall' };
-  const lNet = lens.inc - lens.sp;
-  const lRate = lens.inc > 0 ? Math.round(100 * lNet / lens.inc) : null;
-  const proj = HOME_BL === 'recurring' ? st.projRecur : HOME_BL === 'oneoff' ? null : st.proj;
-  html += '<div class="card"><h3>The bottom line</h3>' +
-    '<div class="seg" style="margin-bottom:12px">' +
-    '<button data-bl="overall" class="' + (HOME_BL === 'overall' ? 'on' : '') + '">Overall</button>' +
-    '<button data-bl="recurring" class="' + (HOME_BL === 'recurring' ? 'on' : '') + '">Recurring</button>' +
-    '<button data-bl="oneoff" class="' + (HOME_BL === 'oneoff' ? 'on' : '') + '">One-off</button></div>' +
-    // Three scannable tiles: In / Out / Net.
-    '<div class="bl-row">' +
-      '<div class="bl-tile"><div class="bl-v amt-pos">' + fmt$(lens.inc) + '</div><div class="bl-l">In so far</div></div>' +
-      '<div class="bl-tile"><div class="bl-v">' + fmt$(lens.sp) + '</div><div class="bl-l">Out so far</div></div>' +
-      '<div class="bl-tile"><div class="bl-v" style="color:' + (lNet >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(lNet, { signed: true }) + '</div>' +
-        '<div class="bl-l">Net' + (lRate !== null && lNet >= 0 ? ' · saving ' + lRate + '%' : '') + '</div></div>' +
-    '</div>' +
-    // Projection strip (overall/recurring only).
-    (proj
-      ? '<div class="bl-proj ' + (proj.net >= 0 ? 'good' : 'bad') + '">' +
-        '<div class="grow"><div class="tiny" style="text-transform:uppercase;letter-spacing:.5px">Projected end of ' + esc(YEAR_LENS) + '</div>' +
-        '<b style="font-size:19px;color:' + (proj.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(proj.net, { signed: true }) + '</b> ' +
-        '<span class="tiny">' + (proj.net >= 0 ? '▲ on track to come out ahead' : '▼ on pace to go under') + '</span></div>' +
-        '<div class="tiny" style="text-align:right;white-space:nowrap">' + fmt$(proj.rateIncome) + '/mo in<br>' + fmt$(proj.rateSpend) + '/mo out</div></div>'
-      : HOME_BL === 'oneoff'
-      ? '<p class="tiny" style="margin:0">One-time money only — seed transfers, gifts, wedding &amp; house costs. It doesn’t repeat, so there’s no forward pace; this is the net of the year’s big irregular events.</p>'
-      : '') +
-    (() => {
-      const negs = st.months.filter((ym) => agg[ym] && agg[ym].spendTotal < 0);
-      return negs.length
-        ? '<p style="margin:8px 0 0;color:var(--status-crit)" class="tiny">⚠️ ' + negs.map(fmtMonth).join(', ') +
-          ' show <b>negative spending</b> — money-in in a spend category. More → Data health.</p>'
-        : '';
-    })() +
-    (HOME_BL === 'overall' && st.invest > 0 ? '<p class="muted tiny" style="margin:8px 0 0">📈 Plus ' + fmt$(st.invest) + ' invested — separate from spending.</p>' : '') +
-    '</div>';
+  // Negative-spending warning (money-in in a spend category), if any.
+  {
+    const negs = st.months.filter((ym) => agg[ym] && agg[ym].spendTotal < 0);
+    if (negs.length)
+      html += '<div class="card"><p style="margin:0;color:var(--status-crit)" class="tiny">⚠️ ' + negs.map(fmtMonth).join(', ') +
+        ' show <b>negative spending</b> — money-in in a spend category. More → Data health.</p></div>';
+  }
 
   if (rq.length){
     html += '<div class="card banner-review" data-x="rev"><div class="row"><span style="font-size:20px">🧾</span>' +
@@ -2234,7 +2198,7 @@ function renderHome(){
 
   const cuts = cutSuggestions(agg, YEAR_LENS);
   if (cuts.length){
-    html += '<div class="card"><h3>Where to cut</h3><p class="tiny" style="margin:0 0 6px">Most over their expected pace' + (YEAR_LENS === 'all' ? ' (all time' : ' in ' + esc(YEAR_LENS) + ' (') + ', full months only)</p>' +
+    html += '<div class="card"><h3>Where to cut</h3><p class="tiny" style="margin:0 0 6px">Most over their expected pace ' + (YEAR_LENS === 'all' ? 'across all time' : 'in ' + esc(YEAR_LENS)) + ' (full months only)</p>' +
       cuts.map((x) => '<div class="list-item" data-cat="' + esc(x.cat.id) + '"><span class="ic">' + esc(x.cat.icon || '•') + '</span>' +
         '<div class="body"><div class="t1">' + esc(x.cat.name) + '</div><div class="t2">' + fmt$(x.ytd) + ' spent vs ' + fmt$(x.expected) + ' expected</div></div>' +
         '<span class="amt" style="color:var(--status-crit)">+' + fmt$(x.over) + '</span></div>').join('') + '</div>';
@@ -2269,12 +2233,12 @@ function renderHome(){
   on('[data-x=import]', () => openScreen('Import', renderImportScreen));
   on('[data-x=bal]', () => openScreen('Accounts', renderAccountsScreen));
   c.querySelectorAll('[data-aidhome]').forEach((n2) => { n2.onclick = () => openAccountModal(n2.dataset.aidhome); });
-  c.querySelectorAll('[data-bl]').forEach((b) => { b.onclick = () => { HOME_BL = b.dataset.bl; renderHome(); }; });
-  c.querySelectorAll('[data-cat]').forEach((n2) => {
-    n2.onclick = () => openCategoryModal(n2.dataset.cat);
-  });
+  // Category leaf (data-cat) and group/subcategory branch (data-cmval) both open a
+  // scoped popup; the chevron (data-btog) expands/collapses the branch in place.
+  c.querySelectorAll('[data-cat]').forEach((n2) => { n2.onclick = () => openCategoryModal(n2.dataset.cat); });
+  c.querySelectorAll('[data-cmval]').forEach((n2) => { n2.onclick = () => openCategoryModal(n2.dataset.cmval); });
   c.querySelectorAll('[data-btog]').forEach((r) => {
-    r.onclick = () => { const k = r.dataset.btog; if (BREAKDOWN_OPEN.has(k)) BREAKDOWN_OPEN.delete(k); else BREAKDOWN_OPEN.add(k); renderHome(); };
+    r.onclick = (e) => { e.stopPropagation(); const k = r.dataset.btog; if (BREAKDOWN_OPEN.has(k)) BREAKDOWN_OPEN.delete(k); else BREAKDOWN_OPEN.add(k); renderHome(); };
   });
   c.querySelectorAll('[data-ym]').forEach((n2) => {
     n2.onclick = () => openMonthModal(n2.dataset.ym);
@@ -2295,11 +2259,11 @@ function openMonthModal(ym){
 }
 // Monthly bars for one category with a dashed budget line. Over-budget months are
 // red, under are green. months = Jan–Dec (a partial year still shows the whole axis).
-function catBarChartHTML(months, vals, budget, curYM){
+function catBarChartHTML(months, vals, budget, avg, curYM){
   const n = months.length;
   const padT = 16, padB = 22, padL = 6, padR = 6;
   const W = Math.max(340, n * 34), H = 170;
-  let maxV = Math.max(1, budget);
+  let maxV = Math.max(1, budget, avg || 0);
   for (const v of vals) maxV = Math.max(maxV, v);
   const colW = (W - padL - padR) / n, barW = Math.max(5, Math.min(22, colW - 8)), baseY = H - padB;
   const yS = (v) => padT + (1 - v / maxV) * (H - padT - padB);
@@ -2313,6 +2277,8 @@ function catBarChartHTML(months, vals, budget, curYM){
     if (v > 0) s += barPath(cx - barW / 2, yS(v), barW, baseY - yS(v), color, over ? 0.95 : 0.72, ' pointer-events="none"');
     if (n <= 12 || i % 2 === 0) s += '<text x="' + cx.toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle" font-size="10" fill="' + (ym === curYM ? 'var(--accent)' : 'var(--faint)') + '" pointer-events="none">' + fmtMonth(ym).slice(0, 3) + '</text>';
   });
+  if (avg > 0){ const ay = yS(avg); s += '<line x1="' + padL + '" y1="' + ay.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + ay.toFixed(1) + '" stroke="var(--blue)" stroke-width="1.5" stroke-dasharray="2 3"/>' +
+    '<text x="' + padL + '" y="' + (ay - 4).toFixed(1) + '" font-size="9" fill="var(--blue)">avg ' + fmt$(avg) + '</text>'; }
   if (budget > 0){ const by = yS(budget); s += '<line x1="' + padL + '" y1="' + by.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + by.toFixed(1) + '" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="5 3"/>' +
     '<text x="' + (W - padR) + '" y="' + (by - 4).toFixed(1) + '" text-anchor="end" font-size="9" fill="var(--accent)">budget ' + fmt$(budget) + '</text>'; }
   return '<div class="chart-wrap"><svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" xmlns="http://www.w3.org/2000/svg">' + s + '</svg></div>';
@@ -2325,67 +2291,73 @@ function openCategoryModal(catId){
   renderCategoryModal(m.node.querySelector('[data-x=cbody]'), catId, m.close);
 }
 function renderCategoryModal(c, catId, close){
-  const cat = DATA.cats[catId];
-  if (!cat){ if (close) close(); return; }
-  const kind = cat.kind || 'expense';
   const agg = buildMonthAgg();
   const years = dataYearList(), yearSeq = ['all'].concat(years);
   const yi = yearSeq.indexOf(YEAR_LENS) < 0 ? 0 : yearSeq.indexOf(YEAR_LENS);
   const st = yearStats(agg, YEAR_LENS);
   const months = st.months, cur = currentYM();
+
+  // Resolve the target: a whole GROUP ('g:gid'), a SUBCATEGORY ('sub:gid|name'), or a
+  // single category id. Aggregates sum their live child categories.
+  let ids, kind, icon, name, editTarget;
+  if (catId && catId.slice(0, 2) === 'g:'){ const gid = catId.slice(2); const g = GROUPS.find((x) => x.id === gid); if (!g){ if (close) close(); return; }
+    ids = liveCats().filter((x) => x.group === gid).map((x) => x.id); kind = g.kind === 'income' ? 'income' : 'expense'; icon = g.icon || '📂'; name = g.name; editTarget = null; }
+  else if (catId && catId.slice(0, 4) === 'sub:'){ const bar = catId.indexOf('|'), gid = catId.slice(4, bar), s = catId.slice(bar + 1); const g = GROUPS.find((x) => x.id === gid);
+    ids = liveCats().filter((x) => x.group === gid && x.sub === s).map((x) => x.id); kind = (g && g.kind === 'income') ? 'income' : 'expense'; icon = subIcon(gid, s); name = s; editTarget = { sub: gid + '|' + s }; }
+  else { const cat = DATA.cats[catId]; if (!cat){ if (close) close(); return; }
+    ids = [catId]; kind = cat.kind || 'expense'; icon = cat.icon || '•'; name = cat.name; editTarget = { cat: catId }; }
+
   const mapKey = kind === 'income' ? 'income' : kind === 'invest' ? 'invest' : 'spend';
-  const monthVal = (ym) => { const a = agg[ym]; return a && a[mapKey] ? (a[mapKey][catId] || 0) : 0; };
+  const monthVal = (ym) => { const a = agg[ym]; if (!a || !a[mapKey]) return 0; let s = 0; for (const id of ids) s += (a[mapKey][id] || 0); return s; };
   const firstData = Object.keys(agg).sort()[0] || cur;
   const vals = months.map(monthVal);
   const total = vals.reduce((s, v) => s + v, 0);
   const fullVals = st.fullMonths.map(monthVal);
   const avgMo = st.fullMonths.length ? Math.round(fullVals.reduce((s, v) => s + v, 0) / st.fullMonths.length) : 0;
-  const cl = catLabel(catId);
+  const baseline = kind === 'expense' ? baselineByCat(agg) : null;
+  const budget = kind === 'expense' ? ids.reduce((s, id) => { const bf = budgetFor(id, baseline); return s + (bf ? bf.amt : 0); }, 0) : 0;
 
   let html = '<div class="modal-closebar"><button class="btn btn-sm" data-x="mclose">✕ Close</button>' +
-    '<b>' + esc(cl.icon) + ' ' + esc(cl.name) + '</b><div style="width:64px"></div></div>';
+    '<b>' + esc(icon) + ' ' + esc(name) + '</b><div style="width:64px"></div></div>';
   html += '<div class="month-nav"><button data-x="yprev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button>' +
     '<select data-x="ysel" class="ynav-sel">' + yearSeq.map((y) => '<option value="' + y + '"' + (y === YEAR_LENS ? ' selected' : '') + '>' + esc(yearLabel(y)) + '</option>').join('') + '</select>' +
     '<button data-x="ynext"' + (yi >= yearSeq.length - 1 ? ' disabled' : '') + '>›</button></div>';
 
   if (kind === 'expense'){
-    const baseline = baselineByCat(agg);
-    const bf = budgetFor(catId, baseline);
-    const budget = bf ? bf.amt : 0;
     const overMonths = st.fullMonths.filter((ym) => budget > 0 && monthVal(ym) > budget).length;
     html += '<div class="card"><div class="bl-row">' +
       '<div class="bl-tile"><div class="bl-v">' + fmt$(total) + '</div><div class="bl-l">Spent</div></div>' +
-      '<div class="bl-tile"><div class="bl-v">' + fmt$(avgMo) + '</div><div class="bl-l">Avg / mo</div></div>' +
-      '<div class="bl-tile"><div class="bl-v"' + (budget ? '' : ' style="color:var(--faint)"') + '>' + (budget ? fmt$(budget) : '—') + '</div><div class="bl-l">Budget / mo</div></div></div>' +
+      '<div class="bl-tile"><div class="bl-v" style="color:var(--blue)">' + fmt$(avgMo) + '</div><div class="bl-l">Avg / mo</div></div>' +
+      '<div class="bl-tile"><div class="bl-v"' + (budget ? ' style="color:var(--accent)"' : ' style="color:var(--faint)"') + '>' + (budget ? fmt$(budget) : '—') + '</div><div class="bl-l">Budget / mo</div></div></div>' +
       (budget ? '<p class="tiny" style="margin:9px 0 0;text-align:center">' + (overMonths ? '<span style="color:var(--status-crit)">Over budget in ' + overMonths + ' of ' + st.fullMonths.length + ' months</span>' : '<span style="color:var(--status-good)">Under budget every month 👏</span>') + '</p>'
-              : '<p class="tiny" style="margin:9px 0 0;text-align:center;color:var(--faint)">No budget set — add one in Budgets to see over/under.</p>') +
+              : '<p class="tiny" style="margin:9px 0 0;text-align:center;color:var(--faint)">No budget set' + (editTarget && editTarget.cat ? ' — add one in Budgets' : '') + '.</p>') +
       '</div>';
-    html += '<div class="card"><h3>Spend by month' + (YEAR_LENS !== 'all' ? ' · ' + esc(YEAR_LENS) : '') + '</h3>' + catBarChartHTML(months, vals, budget, cur) +
-      '<div class="legend"><span><i style="background:var(--viz-2)"></i>Under budget</span><span><i style="background:var(--status-crit)"></i>Over budget</span><span><i style="background:var(--accent)"></i>Budget</span></div></div>';
+    html += '<div class="card"><h3>Spend by month' + (YEAR_LENS !== 'all' ? ' · ' + esc(YEAR_LENS) : '') + '</h3>' + catBarChartHTML(months, vals, budget, avgMo, cur) +
+      '<div class="legend"><span><i style="background:var(--viz-2)"></i>Under budget</span><span><i style="background:var(--status-crit)"></i>Over budget</span>' +
+      (budget ? '<span><i style="background:var(--accent)"></i>Budget</span>' : '') + '<span><i style="background:var(--blue)"></i>Average</span></div></div>';
   } else {
-    // Income / investment: value over time (each month's amount, with a trendline).
     const pts = months.map((ym) => ({ ym, bal: (ym >= firstData && ym <= cur) ? monthVal(ym) : null }));
     html += '<div class="card"><div class="bl-row">' +
       '<div class="bl-tile"><div class="bl-v amt-pos">' + fmt$(total) + '</div><div class="bl-l">' + (kind === 'invest' ? 'Invested' : 'Received') + '</div></div>' +
-      '<div class="bl-tile"><div class="bl-v">' + fmt$(avgMo) + '</div><div class="bl-l">Avg / mo</div></div></div></div>';
-    const chart = balanceChartHTML(pts);
+      '<div class="bl-tile"><div class="bl-v" style="color:var(--blue)">' + fmt$(avgMo) + '</div><div class="bl-l">Avg / mo</div></div></div></div>';
+    const chart = balanceChartHTML(pts, { avg: avgMo });
     if (chart) html += '<div class="card"><h3>' + (kind === 'invest' ? 'Invested' : 'Income') + ' by month' + (YEAR_LENS !== 'all' ? ' · ' + esc(YEAR_LENS) : '') + '</h3>' + chart +
-      '<div class="legend"><span><i style="background:var(--viz-2)"></i>' + (kind === 'invest' ? 'Invested' : 'Income') + '/mo</span><span><i style="background:var(--accent)"></i>Trend</span></div></div>';
+      '<div class="legend"><span><i style="background:var(--viz-2)"></i>' + (kind === 'invest' ? 'Invested' : 'Income') + '/mo</span><span><i style="background:var(--blue)"></i>Average</span><span><i style="background:var(--accent)"></i>Trend</span></div></div>';
   }
 
-  // Month by month list (latest first), over/under flag for expenses.
+  // Month by month list (latest first), over/under vs budget for expenses.
   const rows = st.perMonth.filter((mm) => agg[mm.ym]).slice().reverse();
   if (rows.length){
-    const budget2 = kind === 'expense' ? (() => { const bf = budgetFor(catId, baselineByCat(agg)); return bf ? bf.amt : 0; })() : 0;
     html += '<div class="card"><h3>Month by month</h3>' + rows.map((mm) => {
-      const v = monthVal(mm.ym), over = budget2 > 0 && v > budget2 && mm.ym < cur;
+      const v = monthVal(mm.ym), over = budget > 0 && v > budget && mm.ym < cur;
       return '<div class="list-item" style="cursor:default"><div class="body"><div class="t1">' + fmtMonth(mm.ym) + '</div>' +
-        (budget2 > 0 && mm.ym < cur ? '<div class="t2" style="color:' + (over ? 'var(--status-crit)' : 'var(--status-good)') + '">' + (over ? fmt$(v - budget2) + ' over' : fmt$(budget2 - v) + ' under') + '</div>' : '') + '</div>' +
+        (budget > 0 && mm.ym < cur ? '<div class="t2" style="color:' + (over ? 'var(--status-crit)' : 'var(--status-good)') + '">' + (over ? fmt$(v - budget) + ' over' : fmt$(budget - v) + ' under') + '</div>' : '') + '</div>' +
         '<span class="amt"' + (kind === 'income' ? ' style="color:var(--status-good)"' : '') + '>' + fmt$(v) + '</span></div>';
     }).join('') + '</div>';
   }
 
-  html += '<div class="row" style="margin-bottom:16px"><button class="btn grow" data-x="edit">⚙️ Edit category</button>' +
+  html += '<div class="row" style="margin-bottom:16px">' +
+    (editTarget ? '<button class="btn grow" data-x="edit">' + (editTarget.sub ? '✏️ Edit subcategory' : '⚙️ Edit category') + '</button>' : '') +
     '<button class="btn btn-primary grow" data-x="acts">See transactions →</button></div>';
   c.innerHTML = html;
 
@@ -2394,7 +2366,12 @@ function renderCategoryModal(c, catId, close){
   q('[data-x=yprev]').onclick = () => { YEAR_LENS = yearSeq[yi - 1]; renderCategoryModal(c, catId, close); };
   q('[data-x=ynext]').onclick = () => { YEAR_LENS = yearSeq[yi + 1]; renderCategoryModal(c, catId, close); };
   q('[data-x=ysel]').onchange = (e) => { YEAR_LENS = e.target.value; renderCategoryModal(c, catId, close); };
-  q('[data-x=edit]').onclick = () => openCatEditor(catId, () => { if (DATA.cats[catId]) renderCategoryModal(c, catId, close); else if (close) close(); });
+  const eb = q('[data-x=edit]');
+  if (eb) eb.onclick = () => {
+    const after = () => renderCategoryModal(c, catId, close);
+    if (editTarget.cat) openCatEditor(editTarget.cat, () => { if (DATA.cats[editTarget.cat]) after(); else if (close) close(); });
+    else openSubEditor(editTarget.sub, after);
+  };
   q('[data-x=acts]').onclick = () => { if (close) close(); ACT.cat = catId; ACT.acct = null; actSetMonth(null); showTab('activity'); };
   bindChartTips(c);
 }
@@ -2544,7 +2521,11 @@ function renderAccountModal(c, acctId, close){
   q('[data-x=edit]').onclick = () => openAccountEditor(acctId, () => { if (DATA.accounts[acctId]) renderAccountModal(c, acctId, close); else if (close) close(); });
   const sb = q('[data-x=setbal]'); if (sb) sb.onclick = () => openAccountEditor(acctId, () => renderAccountModal(c, acctId, close));
   q('[data-x=acts]').onclick = () => { if (close) close(); ACT.acct = acctId; ACT.cat = null; actSetMonth(null); showTab('activity'); };
-  c.querySelectorAll('[data-btog]').forEach((r) => { r.onclick = () => { const k = r.dataset.btog; if (BREAKDOWN_OPEN.has(k)) BREAKDOWN_OPEN.delete(k); else BREAKDOWN_OPEN.add(k); renderAccountModal(c, acctId, close); }; });
+  // Inside an account popup the by-category tree stays account-scoped: group/sub rows
+  // and their chevrons just expand/collapse (no global category popup).
+  const acctToggle = (k) => { if (BREAKDOWN_OPEN.has(k)) BREAKDOWN_OPEN.delete(k); else BREAKDOWN_OPEN.add(k); renderAccountModal(c, acctId, close); };
+  c.querySelectorAll('[data-btog]').forEach((r) => { r.onclick = (e) => { e.stopPropagation(); acctToggle(r.dataset.btog); }; });
+  c.querySelectorAll('[data-cmval]').forEach((r) => { r.onclick = () => acctToggle(r.dataset.btk); });
   c.querySelectorAll('.tree-row[data-cat]').forEach((n2) => {
     n2.onclick = () => { if (n2.dataset.cat === '__uncat'){ if (close) close(); showTab('review'); return; } ACT.acct = acctId; ACT.cat = n2.dataset.cat; actSetMonth(null); if (close) close(); showTab('activity'); };
   });
@@ -3001,7 +2982,8 @@ function bindChartTips(container){
 }
 // Balance-over-time line chart with a dashed linear-regression trendline. `pts` is
 // [{ym, bal}]. Caller binds hover via bindChartTips (full-height [data-tip] rects).
-function balanceChartHTML(pts){
+function balanceChartHTML(pts, opts){
+  opts = opts || {};
   if (!pts || pts.length < 2) return '';
   const n = pts.length;
   // Known points (bal != null) keep their real index i, so gaps (months with no
@@ -3017,7 +2999,8 @@ function balanceChartHTML(pts){
   const slope = den ? num / den : 0, intercept = meanY - slope * meanX;
   const first = known[0].i, last = known[known.length - 1].i;
   const t0 = intercept + slope * first, t1 = intercept + slope * last;
-  let lo = Math.min.apply(null, vals.concat([t0, t1])), hi = Math.max.apply(null, vals.concat([t0, t1]));
+  const avgLine = (opts.avg != null) ? [opts.avg] : [];
+  let lo = Math.min.apply(null, vals.concat([t0, t1], avgLine)), hi = Math.max.apply(null, vals.concat([t0, t1], avgLine));
   if (lo === hi){ const b = Math.max(1, Math.abs(lo) * 0.1); hi = lo + b; lo -= b; }
   const pad = (hi - lo) * 0.12; lo -= pad; hi += pad;
   const plotW = W - padL - padR, step = plotW / (n - 1);
@@ -3036,6 +3019,8 @@ function balanceChartHTML(pts){
   const baseY = yF(Math.max(lo, Math.min(hi, 0)));
   s += '<polygon points="' + xF(first).toFixed(1) + ',' + baseY.toFixed(1) + ' ' + linePts.join(' ') + ' ' + xF(last).toFixed(1) + ',' + baseY.toFixed(1) + '" fill="var(--viz-2)" opacity="0.10"/>';
   s += '<line x1="' + xF(first).toFixed(1) + '" y1="' + yF(t0).toFixed(1) + '" x2="' + xF(last).toFixed(1) + '" y2="' + yF(t1).toFixed(1) + '" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="5 4" opacity="0.75"/>';
+  if (opts.avg != null){ const ay = yF(opts.avg); s += '<line x1="' + padL + '" y1="' + ay.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + ay.toFixed(1) + '" stroke="var(--blue)" stroke-width="1.5" stroke-dasharray="2 3"/>' +
+    '<text x="' + padL + '" y="' + (ay - 4).toFixed(1) + '" font-size="9" fill="var(--blue)">avg ' + fmt$(opts.avg) + '</text>'; }
   s += '<polyline points="' + linePts.join(' ') + '" fill="none" stroke="var(--viz-2)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>';
   for (const o of known){
     s += '<circle cx="' + xF(o.i).toFixed(1) + '" cy="' + yF(o.v).toFixed(1) + '" r="3" fill="var(--viz-2)" stroke="var(--card)" stroke-width="1.5"/>';
@@ -3094,9 +3079,14 @@ function yearChartsHTML(agg, months, sel, baseline){
 
   /* -- card 1: spending vs income, grouped bars -- */
   const W1 = Math.max(340, n * 42), H1 = 180;
+  // Average monthly out/in over the full (completed) months shown.
+  const curYM_ = currentYM(), fullM = months.filter((ym) => ym < curYM_), denomA = Math.max(1, fullM.length);
+  const avgSp = Math.round(fullM.reduce((s, ym) => s + agg[ym].spendTotal, 0) / denomA);
+  const avgIn = Math.round(fullM.reduce((s, ym) => s + agg[ym].incomeTotal, 0) / denomA);
   let maxV = 1;
   for (const ym of months) maxV = Math.max(maxV, agg[ym].spendTotal, agg[ym].incomeTotal);
   if (baseline) maxV = Math.max(maxV, baseline.total);
+  maxV = Math.max(maxV, avgSp, avgIn);
   const colW = (W1 - padL - padR) / n;
   const yS = (v) => padT + (1 - v / maxV) * (H1 - padT - padB);
   let s1 = '';
@@ -3144,8 +3134,13 @@ function yearChartsHTML(agg, months, sel, baseline){
   if (baseline){
     const by = yS(baseline.total).toFixed(1);
     s1 += '<line x1="' + padL + '" y1="' + by + '" x2="' + (W1 - padR) + '" y2="' + by + '" stroke="var(--faint)" stroke-dasharray="4 3"/>' +
-      '<text x="' + (W1 - padR) + '" y="' + (yS(baseline.total) - 4).toFixed(1) + '" text-anchor="end" font-size="9" fill="var(--faint)">baseline</text>';
+      '<text x="' + (W1 - padR) + '" y="' + (yS(baseline.total) - 4).toFixed(1) + '" text-anchor="end" font-size="9" fill="var(--faint)">budget</text>';
   }
+  // Average out (left label) + average in (right label) reference lines.
+  if (avgSp > 0){ const y = yS(avgSp).toFixed(1); s1 += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W1 - padR) + '" y2="' + y + '" stroke="var(--viz-1)" stroke-width="1.5" stroke-dasharray="2 3" opacity="0.85"/>' +
+    '<text x="' + padL + '" y="' + (yS(avgSp) - 4).toFixed(1) + '" font-size="9" fill="var(--viz-1)">avg out ' + fmt$(avgSp) + '</text>'; }
+  if (avgIn > 0){ const y = yS(avgIn).toFixed(1); s1 += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W1 - padR) + '" y2="' + y + '" stroke="var(--viz-2)" stroke-width="1.5" stroke-dasharray="2 3" opacity="0.85"/>' +
+    '<text x="' + (W1 - padR) + '" y="' + (yS(avgIn) - 4).toFixed(1) + '" text-anchor="end" font-size="9" fill="var(--viz-2)">avg in ' + fmt$(avgIn) + '</text>'; }
   const sA = agg[sel];
   const net = sA.incomeTotal - sA.spendTotal;
   const sRecur = sA.spendTotal - sA.spendOneTime, sOne = sA.spendOneTime;
