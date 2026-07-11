@@ -250,7 +250,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v4.2'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v4.3'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -778,10 +778,11 @@ function catExcludedFromEstimates(c){
   return !!(g && g.excludeFromBaseline);
 }
 // {ym: {spend: {catId: cents}, spendTotal, incomeTotal}} across all live, non-excluded txns.
-function buildMonthAgg(){
+function buildMonthAgg(acctId){
   const out = {};
   for (const t of liveTxns()){
     if (t.status === 'excluded') continue;
+    if (acctId && t.acct !== acctId) continue;
     const ym = ymOf(t.date);
     const bucket = out[ym] || (out[ym] = { spend: {}, income: {}, invest: {}, spendTotal: 0, incomeTotal: 0, investTotal: 0,
                                            incomeRecur: 0, spendOneTime: 0 });
@@ -1987,7 +1988,7 @@ function renderHome(){
   on('[data-x=recur]', () => showTab('recurring'));
   on('[data-x=import]', () => openScreen('Import', renderImportScreen));
   on('[data-x=bal]', () => openScreen('Accounts', renderAccountsScreen));
-  c.querySelectorAll('[data-aidhome]').forEach((n2) => { n2.onclick = () => openAccountEditor(n2.dataset.aidhome, () => renderHome()); });
+  c.querySelectorAll('[data-aidhome]').forEach((n2) => { n2.onclick = () => openAccountModal(n2.dataset.aidhome); });
   c.querySelectorAll('[data-bl]').forEach((b) => { b.onclick = () => { HOME_BL = b.dataset.bl; renderHome(); }; });
   c.querySelectorAll('[data-cat]').forEach((n2) => {
     n2.onclick = () => {
@@ -2014,6 +2015,77 @@ function openMonthModal(ym){
   UI.month = ym;
   const m = modal('', '<div data-x="mbody"></div>');
   renderMonthScreen(m.node.querySelector('[data-x=mbody]'), m.close);
+}
+// A scrollable popup of the Home overview, scoped to one account.
+function openAccountModal(acctId){
+  const m = modal('', '<div data-x="abody"></div>');
+  renderAccountModal(m.node.querySelector('[data-x=abody]'), acctId, m.close);
+}
+function renderAccountModal(c, acctId, close){
+  const a = DATA.accounts[acctId];
+  if (!a){ if (close) close(); return; }
+  const agg = buildMonthAgg(acctId);
+  const years = Array.from(new Set(Object.keys(agg).map((ym) => ym.slice(0, 4)))).sort();
+  const curYear = currentYM().slice(0, 4);
+  if (!UI.year || !years.includes(UI.year)) UI.year = years.includes(curYear) ? curYear : (years[years.length - 1] || curYear);
+  const yi = years.indexOf(UI.year);
+  const st = yearStats(agg, UI.year);
+  const isBtc = a.type === 'btc';
+
+  let html = '<div class="modal-closebar"><button class="btn btn-sm" data-x="mclose">✕ Close</button>' +
+    '<b>' + acctIcon(a.type) + ' ' + esc(a.name) + '</b><div style="width:64px"></div></div>';
+
+  // Balance / holdings header.
+  if (isBtc){
+    if (BTC_PRICE == null || Date.now() - (BTC_PRICE.at || 0) > 300000) refreshBtcPrice().then((r) => { if (r.changed && DATA.accounts[acctId]) renderAccountModal(c, acctId, close); });
+    const b = btcStats(acctId), gain = b.value != null ? b.value - b.invested : null;
+    html += '<div class="card"><div class="stat-grid">' +
+      '<div class="stat"><div class="v">' + fmtBtc(b.sats) + '</div><div class="l">holdings</div></div>' +
+      '<div class="stat"><div class="v">' + (b.value != null ? fmt$(b.value) : '—') + '</div><div class="l">current value</div></div></div>' +
+      '<p class="tiny" style="margin:8px 0 0">Invested ' + fmt$(b.invested) + ' · avg ' + (b.avgCost ? fmt$(b.avgCost) : '—') + ' · now ' + (b.price ? fmt$(b.price) : '—') + '/₿' +
+      (gain != null ? ' · <b style="color:' + (gain >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(gain, { signed: true }) + '</b>' : '') + '</p></div>';
+  } else {
+    const bal = accountBalance(a);
+    html += '<div class="card"><div class="row"><span class="grow"><b>Current balance</b><div class="tiny">' + esc(acctTypeLabel(a.type)) + '</div></span>' +
+      (bal == null ? '<a data-x="setbal" style="cursor:pointer;color:var(--accent)">Set balance ›</a>'
+                   : '<b style="font-size:18px' + (bal < 0 ? ';color:var(--status-crit)' : '') + '">' + fmt$(bal) + '</b>') + '</div></div>';
+  }
+
+  // In / Out / Net for the year, on this account.
+  html += '<div class="month-nav"><button data-x="yprev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button><b>' + esc(UI.year) + '</b>' +
+    '<button data-x="ynext"' + (yi >= years.length - 1 ? ' disabled' : '') + '>›</button></div>';
+  const net = st.income - st.spend;
+  html += '<div class="bl-row">' +
+    '<div class="bl-tile"><div class="bl-v amt-pos">' + fmt$(st.income) + '</div><div class="bl-l">In</div></div>' +
+    '<div class="bl-tile"><div class="bl-v">' + fmt$(st.spend) + '</div><div class="bl-l">Out</div></div>' +
+    '<div class="bl-tile"><div class="bl-v" style="color:' + (net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(net, { signed: true }) + '</div><div class="bl-l">Net</div></div></div>';
+
+  // Category breakdown for this account (collapsible tree).
+  const gc = groupedCatHTML(st.byCat, st.incomeByCat, st.investByCat, { pfx: 'acct' });
+  if (gc) html += '<div class="card"><h3>' + esc(UI.year) + ' by category</h3>' + gc + '</div>';
+
+  // Month by month, this account.
+  if (st.perMonth.length)
+    html += '<div class="card"><h3>Month by month</h3>' + st.perMonth.slice().reverse().map((mm) =>
+      '<div class="list-item" style="cursor:default"><div class="body"><div class="t1">' + fmtMonth(mm.ym) + '</div>' +
+      '<div class="t2">out ' + fmt$(mm.spend) + ' · in ' + fmt$(mm.income) + '</div></div>' +
+      '<span class="amt" style="color:' + (mm.net >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(mm.net, { signed: true }) + '</span></div>').join('') + '</div>';
+
+  html += '<div class="row" style="margin-bottom:16px"><button class="btn grow" data-x="edit">⚙️ Edit account</button>' +
+    '<button class="btn btn-primary grow" data-x="acts">Open in Activity →</button></div>';
+  c.innerHTML = html;
+
+  const q = (s) => c.querySelector(s);
+  q('[data-x=mclose]').onclick = () => close && close();
+  q('[data-x=yprev]').onclick = () => { UI.year = years[yi - 1]; renderAccountModal(c, acctId, close); };
+  q('[data-x=ynext]').onclick = () => { UI.year = years[yi + 1]; renderAccountModal(c, acctId, close); };
+  q('[data-x=edit]').onclick = () => openAccountEditor(acctId, () => { if (DATA.accounts[acctId]) renderAccountModal(c, acctId, close); else if (close) close(); });
+  const sb = q('[data-x=setbal]'); if (sb) sb.onclick = () => openAccountEditor(acctId, () => renderAccountModal(c, acctId, close));
+  q('[data-x=acts]').onclick = () => { if (close) close(); ACT.acct = acctId; ACT.cat = null; actSetMonth(null); showTab('activity'); };
+  c.querySelectorAll('[data-btog]').forEach((r) => { r.onclick = () => { const k = r.dataset.btog; if (BREAKDOWN_OPEN.has(k)) BREAKDOWN_OPEN.delete(k); else BREAKDOWN_OPEN.add(k); renderAccountModal(c, acctId, close); }; });
+  c.querySelectorAll('.tree-row[data-cat]').forEach((n2) => {
+    n2.onclick = () => { if (n2.dataset.cat === '__uncat'){ if (close) close(); showTab('review'); return; } ACT.acct = acctId; ACT.cat = n2.dataset.cat; actSetMonth(null); if (close) close(); showTab('activity'); };
+  });
 }
 function renderMonthScreen(c, close){
   const agg = buildMonthAgg();
