@@ -256,7 +256,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v5.0'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v5.1'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -397,7 +397,12 @@ function parseAmountCents(s){
   if (s.startsWith('+')) s = s.slice(1);
   if (!/^\d+(\.\d*)?$/.test(s) && !/^\.\d+$/.test(s)) return null;
   const parts = s.split('.');
-  const cents = (parseInt(parts[0] || '0', 10) * 100) + parseInt(((parts[1] || '') + '00').slice(0, 2), 10);
+  let whole = parseInt(parts[0] || '0', 10);
+  const frac = parts[1] || '';
+  let c2 = parseInt((frac + '00').slice(0, 2), 10);
+  if (frac.length >= 3 && +frac[2] >= 5) c2 += 1;   // round (not truncate) a 3rd decimal
+  if (c2 >= 100){ c2 -= 100; whole += 1; }
+  const cents = whole * 100 + c2;
   return neg ? -cents : cents;
 }
 function isoDate(y, mo, d){
@@ -496,7 +501,11 @@ function renameSub(groupId, oldSub, newSub){
   if (ic && ic !== '📁') setSubMeta(groupId, newSub, { icon: ic });
 }
 const CATS_OPEN = new Set(); // collapsible tree state: 'g:<gid>' and 'sub:<gid>|<sub>'
-const saveData = debounce(() => { try { localStorage.setItem(LSKEY, JSON.stringify(DATA)); } catch (e) {} }, 250);
+let SAVE_FAILED = false;
+const saveData = debounce(() => {
+  try { localStorage.setItem(LSKEY, JSON.stringify(DATA)); SAVE_FAILED = false; }
+  catch (e) { if (!SAVE_FAILED){ SAVE_FAILED = true; try { toast('⚠️ Could not save to this device — storage may be full. Turn on Sync or export a backup so edits aren’t lost.'); } catch (_) {} } }
+}, 250);
 const saveNow = () => saveData.now();
 
 // All mutations flow through put()/softDelete() so updatedAt + sync stay honest.
@@ -532,9 +541,17 @@ function seedIfEmpty(){
 }
 function purgeTombstones(){
   const cutoff = new Date(Date.now() - TOMBSTONE_DAYS * 864e5).toISOString();
-  for (const m of SYNC_MAPS)
+  // NEVER purge these — their tombstones are load-bearing:
+  //  • txns: import dedupe counts tombstones so a deleted charge isn't resurrected
+  //    (and double-counted) when the same statement is re-imported months later.
+  //  • cats/rules: seedIfEmpty() upserts seed rows by id, so a purged seed tombstone
+  //    would silently reappear (and re-propagate over sync).
+  const KEEP = new Set(['txns', 'cats', 'rules']);
+  for (const m of SYNC_MAPS){
+    if (KEEP.has(m)) continue;
     for (const id in DATA[m])
       if (DATA[m][id].deleted && DATA[m][id].updatedAt < cutoff) delete DATA[m][id];
+  }
 }
 function settings(){
   return DATA.kv.settings || { id: 'settings', baselineFrom: '', baselineTo: '' };
@@ -834,7 +851,10 @@ function baselineByCat(agg){
     if ((c.kind || 'expense') !== 'expense') continue;
     if (catExcludedFromEstimates(c)) continue;
     const vals = months.map((ym) => (agg[ym].spend[c.id] || 0));
-    const med = median(vals);
+    // Seasonal categories (lawn, pool) sit at $0 most months, so a median collapses
+    // to 0 and they'd drop out of the baseline entirely — meaning "where to cut" could
+    // never flag them. Use the window mean instead so their cost still books a budget.
+    const med = c.seasonal ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : median(vals);
     if (med > 0){ out.cats[c.id] = med; out.total += med; }
   }
   return out;
@@ -1227,7 +1247,7 @@ async function syncPush(){
         body: JSON.stringify({ baseVer: SYNC.serverVer, env }),
       });
       if (res.status === 409) continue;      // lost the race — merge again
-      if (res.status === 401){ setSync('locked'); return; }
+      if (res.status === 401){ SYNC.dirty = true; setSync('locked'); return; } // keep the edit pending; don't report it as saved
       if (!res.ok) throw 0;
       const body = await res.json();
       SYNC.serverVer = body.ver;
@@ -1576,7 +1596,7 @@ function openCatTreePicker(opts){
       return '<div class="tree-row ' + lvl + '" data-pick="' + esc(pickVal) + '" style="cursor:pointer"><span class="ic">' + icon + '</span>' +
         '<div class="body"><div class="t1">' + esc(name) + '</div></div>' +
         (on ? '<span class="chev" style="color:var(--accent)">✓</span>' : '') +
-        '<span class="chev" data-tog="' + togKey + '">' + (sOpen ? '▾' : '▸') + '</span></div>';
+        '<span class="chev" data-tog="' + esc(togKey) + '">' + (sOpen ? '▾' : '▸') + '</span></div>';
     };
     const leaf = (cat, lvl) => { const on = opts.current === cat.id; return '<div class="tree-row ' + lvl + '" data-pick="' + esc(cat.id) + '"><span class="ic">' + esc(cat.icon || '•') + '</span><div class="body"><div class="t1">' + esc(cat.name) + '</div></div><span class="chev">' + (on ? '✓' : '') + '</span></div>'; };
     function draw(){
@@ -1755,7 +1775,8 @@ function openTxnEditor(id){
     put('txns', t); m.close(); renderCurrent(); toast('Direction flipped');
   };
   q('[data-x=split]').onclick = () => { m.close(); openSplitEditor(t); };
-  q('[data-x=transfer]').onclick = () => {
+  q('[data-x=transfer]').onclick = async () => {
+    if (t.splits && t.splits.length && !(await confirmDlg('Mark as transfer? This replaces the existing split with one category.', 'Mark transfer'))) return;
     t.cat = 'sys-transfer'; t.splits = null;
     if (t.status === 'review') t.status = 'ok';
     put('txns', t); m.close(); renderCurrent(); toast('Marked as transfer');
@@ -2274,6 +2295,11 @@ function renderAccountModal(c, acctId, close){
         '<div class="bl-tile"><div class="bl-v"' + (curBal < 0 ? ' style="color:var(--status-crit)"' : '') + '>' + fmt$(curBal) + '</div><div class="bl-l">Current</div></div>' +
         '<div class="bl-tile"><div class="bl-v" style="color:' + (delta >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(delta, { signed: true }) + '</div><div class="bl-l">Change</div></div></div>' +
         '<p class="tiny" style="margin:8px 0 0">' + esc(acctTypeLabel(a.type)) + ' · ' + fmtMonth(pts[0].ym) + ' → ' + fmtMonth(pts[pts.length - 1].ym) + '</p></div>';
+    } else if (YEAR_LENS !== 'all' && !pts.length){
+      // Selected year predates this account's activity — don't pass off today's
+      // balance as this year's. Say so plainly.
+      html += '<div class="card"><p class="muted" style="margin:0">No activity for this account in ' + esc(YEAR_LENS) + '.' +
+        (bal != null ? ' Its balance today is <b>' + fmt$(bal) + '</b>.' : '') + ' Switch the year above to Overall to see its full history.</p></div>';
     } else {
       html += '<div class="card"><div class="row"><span class="grow"><b>Current balance</b><div class="tiny">' + esc(acctTypeLabel(a.type)) + '</div></span>' +
         (bal == null ? '<a data-x="setbal" style="cursor:pointer;color:var(--accent)">Set balance ›</a>'
@@ -3405,9 +3431,10 @@ function openCatEditor(catId, after){
     (isSystem ? '' :
       '<label class="row" style="margin:0 0 12px"><input type="checkbox" data-x="seasonal" style="width:auto"' + (cat.seasonal ? ' checked' : '') + '> ' +
       '<span class="muted">Seasonal — only bills certain months (lawn, pool). Its cost is spread across the year so it doesn’t inflate the months it lands in. Leave off for bills like mortgage or car payments.</span></label>') +
-    '<button class="btn btn-block" data-x="merge" style="margin-bottom:8px">🔀 Merge into another category…</button>' +
-    '<div class="row"><button class="btn grow" data-x="sv">Save</button>' +
-    '<button class="btn btn-danger grow" data-x="ar">Archive</button></div>');
+    (isSystem ? '<p class="tiny" style="margin:0 0 8px;color:var(--faint)">Built-in system category — can’t be merged or archived (transfer/exclude actions write to it).</p>'
+              : '<button class="btn btn-block" data-x="merge" style="margin-bottom:8px">🔀 Merge into another category…</button>') +
+    '<div class="row"><button class="btn ' + (isSystem ? 'btn-primary ' : '') + 'grow" data-x="sv">Save</button>' +
+    (isSystem ? '' : '<button class="btn btn-danger grow" data-x="ar">Archive</button>') + '</div>');
   m.node.querySelector('[data-x=sv]').onclick = () => {
     const name = m.node.querySelector('[data-x=nm]').value.trim();
     if (!name) return;
@@ -3418,8 +3445,10 @@ function openCatEditor(catId, after){
     if (!isSystem) cat.seasonal = m.node.querySelector('[data-x=seasonal]').checked;
     put('cats', cat); m.close(); if (after) after(); renderCurrent(); toast('Category updated');
   };
-  m.node.querySelector('[data-x=merge]').onclick = () => { m.close(); openMergePicker(cat.id, after); };
-  m.node.querySelector('[data-x=ar]').onclick = async () => {
+  const mergeBtn = m.node.querySelector('[data-x=merge]');
+  if (mergeBtn) mergeBtn.onclick = () => { m.close(); openMergePicker(cat.id, after); };
+  const arBtn = m.node.querySelector('[data-x=ar]');
+  if (arBtn) arBtn.onclick = async () => {
     if (!(await confirmDlg('Archive “' + cat.name + '”? Existing transactions keep it; it just leaves the pickers.', 'Archive'))) return;
     softDelete('cats', cat.id); m.close(); if (after) after();
   };
