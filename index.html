@@ -298,7 +298,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v7.2'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v7.3'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -2379,8 +2379,11 @@ function catBarChartHTML(months, vals, budget, avg, curYM){
    Independent of the Wedding Gifts transactions; a gift may be money and/or an item. ---- */
 function giftItems(){ return (DATA.kv.gifts && DATA.kv.gifts.items) || []; }
 function saveGiftItems(items){ put('kv', { id: 'gifts', items: items }); }
+// A cell that means "still waiting / to be decided" rather than a real amount/note.
+const GIFT_TBD_RE = /^(tbd|tbc|pending|n\/?a|\?+|-+|—|waiting)$/i;
 // Parse pasted spreadsheet rows: one gift per line, cells split by tab (Excel copy)
-// or comma. First cell = giver; a cell that reads as money = amount; the rest = note.
+// or comma. First cell = giver; a cell that reads as money = amount; a "TBD"-type cell
+// marks it still-waiting; the rest = note. A row with nothing but a name is TBD too.
 function parseGiftPaste(text){
   const rows = [];
   for (const raw of String(text || '').split(/\r?\n/)){
@@ -2389,15 +2392,20 @@ function parseGiftPaste(text){
     const cells = (line.indexOf('\t') >= 0 ? line.split('\t') : line.split(',')).map((s) => s.trim());
     const name = cells[0];
     if (!name) continue;
-    let amt = null; const noteParts = [];
+    let amt = null, pending = false; const noteParts = [];
     for (let i = 1; i < cells.length; i++){
-      const cents = /\d/.test(cells[i]) ? parseAmountCents(cells[i]) : null;
+      const cell = cells[i];
+      if (!cell) continue;
+      if (GIFT_TBD_RE.test(cell)){ pending = true; continue; }
+      const cents = /\d/.test(cell) ? parseAmountCents(cell) : null;
       if (amt === null && cents !== null) amt = cents;
-      else if (cells[i]) noteParts.push(cells[i]);
+      else noteParts.push(cell);
     }
-    // skip an obvious header row ("Name / Guest / From …" with no money)
-    if (amt === null && /^(name|guest|from|giver|gift)s?$/i.test(name)) continue;
-    rows.push({ name: name, amt: amt, note: noteParts.join(' · ') });
+    // skip an obvious header row ("Name / Guest / From …" with nothing else)
+    if (amt === null && !noteParts.length && !pending && /^(name|guest|from|giver|gift)s?$/i.test(name)) continue;
+    // nothing entered but a name = we're still waiting on this one
+    if (amt === null && !noteParts.length) pending = true;
+    rows.push({ name: name, amt: amt, note: noteParts.join(' · '), pending: pending });
   }
   return rows;
 }
@@ -2417,36 +2425,41 @@ function groupGifts(items){
   }
   const groups = [...map.values()].map((grp) => ({
     name: grp.name, gifts: grp.gifts,
-    total: grp.gifts.reduce((s, g) => s + (g.amt || 0), 0),
-    allThanked: grp.gifts.every((g) => g.thanked)
+    total: grp.gifts.reduce((s, g) => s + (g.pending ? 0 : (g.amt || 0)), 0),
+    anyPending: grp.gifts.some((g) => g.pending),
+    allThanked: grp.gifts.every((g) => g.thanked && !g.pending)
   }));
   groups.sort((a, b) => b.total - a.total || (a.name || '').localeCompare(b.name || ''));
   return groups;
 }
+// Leading status symbol: ⏳ still waiting · ✅ thanked · ⭕ received but not yet thanked.
+const giftStatusIcon = (pending, thanked) => pending ? '⏳' : (thanked ? '✅' : '⭕');
+const giftAmtCell = (g) => g.amt != null ? fmt$(g.amt) : (g.pending ? '<span style="color:var(--dim)">TBD</span>' : '');
 function giftGroupHTML(grp){
   if (grp.gifts.length === 1){
     const g = grp.gifts[0];
-    return '<div class="list-item gift-row" data-giftedit="' + esc(g.id) + '" style="cursor:pointer">' +
-      '<span class="ic gift-thx' + (g.thanked ? ' on' : '') + '" data-thx="' + esc(g.id) + '" title="' + (g.thanked ? 'Thanked' : 'Mark thanked') + '">' + (g.thanked ? '✅' : '⭕') + '</span>' +
-      '<div class="body"><div class="t1">' + esc(g.name || '—') + '</div>' + (g.note ? '<div class="t2">' + esc(g.note) + '</div>' : '') + '</div>' +
-      '<span class="amt">' + (g.amt != null ? fmt$(g.amt) : '') + '</span></div>';
+    return '<div class="list-item gift-row' + (g.pending ? ' gift-pending' : '') + '" data-giftedit="' + esc(g.id) + '" style="cursor:pointer">' +
+      '<span class="ic gift-thx' + ((g.thanked && !g.pending) ? ' on' : '') + '" data-thx="' + esc(g.id) + '" title="' + (g.pending ? 'Still waiting — tap when it arrives' : (g.thanked ? 'Thanked' : 'Mark thanked')) + '">' + giftStatusIcon(g.pending, g.thanked) + '</span>' +
+      '<div class="body"><div class="t1">' + esc(g.name || '—') + '</div>' + (g.note ? '<div class="t2">' + esc(g.note) + '</div>' : (g.pending ? '<div class="t2" style="color:var(--dim)">still waiting</div>' : '')) + '</div>' +
+      '<span class="amt">' + giftAmtCell(g) + '</span></div>';
   }
   const ids = grp.gifts.map((g) => g.id).join(',');
-  let h = '<div class="list-item gift-row gift-person">' +
-    '<span class="ic gift-thx' + (grp.allThanked ? ' on' : '') + '" data-thxmany="' + esc(ids) + '" title="Mark all thanked">' + (grp.allThanked ? '✅' : '⭕') + '</span>' +
+  let h = '<div class="list-item gift-row gift-person' + (grp.anyPending ? ' gift-pending' : '') + '">' +
+    '<span class="ic gift-thx' + (grp.allThanked ? ' on' : '') + '" data-thxmany="' + esc(ids) + '" title="' + (grp.anyPending ? 'Still waiting on a gift' : 'Mark all thanked') + '">' + giftStatusIcon(grp.anyPending, grp.allThanked) + '</span>' +
     '<div class="body"><div class="t1">' + esc(grp.name || '—') + ' <span style="color:var(--dim);font-weight:400;font-size:12px">· ' + grp.gifts.length + ' gifts</span></div></div>' +
     '<span class="amt">' + (grp.total ? fmt$(grp.total) : '') + '</span></div>';
   for (const g of grp.gifts)
-    h += '<div class="list-item gift-sub" data-giftedit="' + esc(g.id) + '" style="cursor:pointer">' +
-      '<div class="body"><div class="t2">' + (g.note ? esc(g.note) : (g.amt != null ? 'Cash gift' : 'Gift')) + '</div></div>' +
-      '<span class="amt">' + (g.amt != null ? fmt$(g.amt) : '') + '</span></div>';
+    h += '<div class="list-item gift-sub' + (g.pending ? ' gift-pending' : '') + '" data-giftedit="' + esc(g.id) + '" style="cursor:pointer">' +
+      '<div class="body"><div class="t2">' + (g.pending ? '⏳ ' : '') + (g.note ? esc(g.note) : (g.pending ? 'still waiting' : (g.amt != null ? 'Cash gift' : 'Gift'))) + '</div></div>' +
+      '<span class="amt">' + giftAmtCell(g) + '</span></div>';
   return h;
 }
 function renderGiftList(c, close){
   const items = giftItems().slice();
   const groups = groupGifts(items);
-  const total = items.reduce((s, g) => s + (g.amt || 0), 0);
+  const total = items.reduce((s, g) => s + (g.pending ? 0 : (g.amt || 0)), 0);
   const thankedPeople = groups.filter((gp) => gp.allThanked).length;
+  const pendingCount = items.filter((g) => g.pending).length;
   let html = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">' +
     '<b style="font-size:17px">🎁 Wedding Gift Registry</b>' +
     '<button class="btn btn-sm" data-x="close">✕ Close</button></div>';
@@ -2459,7 +2472,9 @@ function renderGiftList(c, close){
     '<button class="btn btn-primary grow" data-x="add">＋ Add gift</button></div>';
   html += groups.length
     ? '<div class="card" style="padding:2px 12px">' + groups.map(giftGroupHTML).join('') + '</div>' +
-      '<p class="tiny" style="margin:8px 0 16px">' + items.length + ' gifts from ' + groups.length + ' people · tap ⭕ to mark thanked · tap a gift to edit · ' +
+      '<p class="tiny" style="margin:8px 0 16px">' + items.length + ' gifts from ' + groups.length + ' people' +
+      (pendingCount ? ' · <span style="color:var(--status-warn)">⏳ ' + pendingCount + ' still waiting</span>' : '') +
+      ' · tap ⭕ to mark thanked · tap a gift to edit · ' +
       '<a data-x="clearall" style="color:var(--status-crit);cursor:pointer">Clear all</a></p>'
     : '<div class="empty" style="margin-bottom:16px">No gifts yet — paste your list from Excel, or add them one at a time.</div>';
   c.innerHTML = html;
@@ -2471,28 +2486,31 @@ function renderGiftList(c, close){
   { const ca = q('[data-x=clearall]'); if (ca) ca.onclick = async () => {
     if (await confirmDlg('Delete all ' + giftItems().length + ' gifts from the registry? This can’t be undone.', 'Clear all')){ saveGiftItems([]); rerender(); }
   }; }
+  // Tapping the status symbol advances it: ⏳ still-waiting → ⭕ received → ✅ thanked (⭕⇄✅ toggles).
   c.querySelectorAll('[data-thx]').forEach((n) => { n.onclick = (e) => {
     e.stopPropagation();
     const items2 = giftItems().slice(); const g = items2.find((x) => x.id === n.dataset.thx);
-    if (g){ g.thanked = !g.thanked; saveGiftItems(items2); rerender(); }
+    if (g){ if (g.pending) g.pending = false; else g.thanked = !g.thanked; saveGiftItems(items2); rerender(); }
   }; });
   c.querySelectorAll('[data-thxmany]').forEach((n) => { n.onclick = (e) => {
     e.stopPropagation();
     const ids = n.dataset.thxmany.split(','), items2 = giftItems().slice();
-    const target = !ids.every((id) => { const g = items2.find((x) => x.id === id); return g && g.thanked; });
-    for (const id of ids){ const g = items2.find((x) => x.id === id); if (g) g.thanked = target; }
+    const gifts = ids.map((id) => items2.find((x) => x.id === id)).filter(Boolean);
+    if (gifts.some((g) => g.pending)){ for (const g of gifts) g.pending = false; } // all received
+    else { const target = !gifts.every((g) => g.thanked); for (const g of gifts) g.thanked = target; }
     saveGiftItems(items2); rerender();
   }; });
   c.querySelectorAll('[data-giftedit]').forEach((n) => { n.onclick = () => openGiftEditor(n.dataset.giftedit, rerender); });
 }
 function openGiftEditor(id, after){
   const existing = id ? giftItems().find((x) => x.id === id) : null;
-  const g = existing ? Object.assign({}, existing) : { id: 'gift_' + uid(), name: '', amt: null, note: '', thanked: false };
+  const g = existing ? Object.assign({}, existing) : { id: 'gift_' + uid(), name: '', amt: null, note: '', thanked: false, pending: false };
   const m = modal(id ? 'Edit gift' : 'Add gift',
     '<label class="fld"><span>From (who gave it)</span><input type="text" data-x="nm" value="' + esc(g.name || '') + '" placeholder="Aunt Sue"></label>' +
     '<label class="fld"><span>Amount (leave blank for a non-cash gift)</span><input type="number" step="0.01" inputmode="decimal" data-x="amt" value="' + (g.amt != null ? (g.amt / 100) : '') + '" placeholder="e.g. 200"></label>' +
     '<label class="fld"><span>Gift / note</span><input type="text" data-x="note" value="' + esc(g.note || '') + '" placeholder="check, KitchenAid mixer, …"></label>' +
-    '<label class="row" style="align-items:center;gap:8px;margin:2px 0 12px;cursor:pointer"><input type="checkbox" data-x="thx"' + (g.thanked ? ' checked' : '') + '><span>Thank-you note sent</span></label>' +
+    '<label class="row" style="align-items:center;gap:8px;margin:2px 0 8px;cursor:pointer"><input type="checkbox" data-x="pending"' + (g.pending ? ' checked' : '') + '><span>⏳ Still waiting (gift TBD)</span></label>' +
+    '<label class="row" style="align-items:center;gap:8px;margin:0 0 12px;cursor:pointer"><input type="checkbox" data-x="thx"' + (g.thanked ? ' checked' : '') + '><span>Thank-you note sent</span></label>' +
     '<div class="row"><button class="btn btn-primary grow" data-x="save">Save</button>' +
     (id ? '<button class="btn btn-danger" data-x="del">Delete</button>' : '') + '</div>');
   m.node.querySelector('[data-x=save]').onclick = () => {
@@ -2502,6 +2520,7 @@ function openGiftEditor(id, after){
     g.name = name;
     g.amt = amtRaw === '' ? null : parseAmountCents(amtRaw);
     g.note = m.node.querySelector('[data-x=note]').value.trim();
+    g.pending = m.node.querySelector('[data-x=pending]').checked;
     g.thanked = m.node.querySelector('[data-x=thx]').checked;
     const items = giftItems().slice();
     const i = items.findIndex((x) => x.id === g.id);
@@ -2516,19 +2535,19 @@ function openGiftEditor(id, after){
 }
 function openGiftImport(after){
   const m = modal('Paste gift list',
-    '<p class="tiny" style="margin:0 0 8px">Copy the rows from your Excel and paste below — one gift per line. Nest reads the <b>first cell as the giver</b>, a cell that looks like money as the <b>amount</b>, and the rest as a <b>note</b>. A header row is skipped.</p>' +
+    '<p class="tiny" style="margin:0 0 8px">Copy the rows from your Excel and paste below — one gift per line. Nest reads the <b>first cell as the giver</b>, a cell that looks like money as the <b>amount</b>, and the rest as a <b>note</b>. A cell that says <b>TBD</b> (or a name with nothing else) is flagged ⏳ still-waiting. A header row is skipped.</p>' +
     '<textarea data-x="paste" rows="8" placeholder="Aunt Sue    500    check&#10;Uncle Bob    KitchenAid mixer&#10;The Smiths    250"></textarea>' +
     '<div data-x="preview" class="tiny" style="margin:8px 0;min-height:16px;color:var(--dim)"></div>' +
     '<div class="row"><button class="btn grow" data-x="add">Add to list</button><button class="btn btn-primary grow" data-x="replace">Replace list</button></div>');
   const ta = m.node.querySelector('[data-x=paste]'), prev = m.node.querySelector('[data-x=preview]');
-  ta.oninput = () => { const r = parseGiftPaste(ta.value); const tot = r.reduce((s, g) => s + (g.amt || 0), 0);
-    prev.textContent = r.length ? ('Found ' + r.length + ' gift' + (r.length === 1 ? '' : 's') + (tot ? ' · ' + fmt$(tot) + ' total' : '')) : ''; };
+  ta.oninput = () => { const r = parseGiftPaste(ta.value); const tot = r.reduce((s, g) => s + (g.pending ? 0 : (g.amt || 0)), 0); const pend = r.filter((g) => g.pending).length;
+    prev.textContent = r.length ? ('Found ' + r.length + ' gift' + (r.length === 1 ? '' : 's') + (tot ? ' · ' + fmt$(tot) + ' total' : '') + (pend ? ' · ⏳ ' + pend + ' TBD' : '')) : ''; };
   const commit = (replace) => {
     const parsed = parseGiftPaste(ta.value);
     if (!parsed.length){ toast('Nothing recognized to import'); return; }
     const prevThx = {}; if (replace) for (const g of giftItems()) if (g.thanked) prevThx[(g.name || '').toLowerCase()] = true;
     const items = replace ? [] : giftItems().slice();
-    for (const p of parsed) items.push({ id: 'gift_' + uid(), name: p.name, amt: p.amt, note: p.note, thanked: replace ? !!prevThx[(p.name || '').toLowerCase()] : false });
+    for (const p of parsed) items.push({ id: 'gift_' + uid(), name: p.name, amt: p.amt, note: p.note, pending: p.pending, thanked: replace ? !!prevThx[(p.name || '').toLowerCase()] : false });
     saveGiftItems(items); m.close(); if (after) after();
     toast('Imported ' + parsed.length + ' gift' + (parsed.length === 1 ? '' : 's'));
   };
