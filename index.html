@@ -259,7 +259,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v5.5'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v5.6'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -2186,12 +2186,12 @@ function renderHome(){
     '<span class="menu-chev">›</span></div>').join('') +
     '<p class="tiny" style="margin:8px 0 0">Tap a month for its full breakdown — budgets, categories, gifts, alcohol, groceries…</p></div>';
 
-  const rec = detectRecurring();
-  const recBills = rec.filter((r) => r.kind === 'expense'); // transfers shown in Recurring screen, not the load
-  if (recBills.length){
-    const rt = recBills.reduce((s, r) => s + r.annualizedMonthly, 0); // annualized /mo, additive
+  const recCats = recurringCatData(); // same category-based total the Recurring tab shows
+  const recIds = Object.keys(recCats);
+  if (recIds.length){
+    const rt = recIds.reduce((s, cid) => s + recCats[cid].annualizedMonthly, 0); // annualized /mo, additive
     html += '<div class="card" data-x="recur" style="cursor:pointer"><div class="row"><span style="font-size:18px">🔁</span>' +
-      '<div class="grow muted">Recurring load: <b style="color:var(--text)">' + fmt$(rt) + '/mo</b> avg across ' + recBills.length + ' repeat bills</div>' +
+      '<div class="grow muted">Recurring load: <b style="color:var(--text)">' + fmt$(rt) + '/mo</b> avg across ' + recIds.length + ' categor' + (recIds.length === 1 ? 'y' : 'ies') + '</div>' +
       '<span class="menu-chev">›</span></div></div>';
   }
   html += '<button class="btn btn-primary btn-block" data-x="import" style="margin-bottom:16px">📥 Import statements</button>';
@@ -3232,48 +3232,79 @@ function recurCadenceLabel(r){
   if (!r.trulySeasonal && r.cadence === 'monthly' && r.min !== r.max) base += ' · ' + fmt$(r.min) + '–' + fmt$(r.max);
   return base;
 }
+// EVERY non-one-time expense category that has any spend history, amortized to a
+// monthly figure — the complete recurring list. (detectRecurring is merchant-based
+// and needs 3+ months per merchant, so it silently drops whole categories.) Seasonal
+// cats spread their yearly cost over 12; the rest divide by the months of data we have.
+function recurringCatData(){
+  const agg = buildMonthAgg();
+  const months = Object.keys(agg).sort();
+  if (!months.length) return {};
+  let lastYM = months[months.length - 1]; const cur = currentYM(); if (lastYM < cur) lastYM = cur; // run each category's span through today
+  const out = {};
+  for (const c of liveCats()){
+    if ((c.kind || 'expense') !== 'expense') continue;
+    if (catIsOneTime(c)) continue;
+    const calAmt = {}, calCnt = {}; let total = 0, firstYM = null, active = 0, mn = Infinity, mx = 0;
+    for (const ym of months){
+      const v = agg[ym].spend[c.id] || 0;
+      if (v <= 0) continue;
+      total += v; active++; if (!firstYM) firstYM = ym; if (v < mn) mn = v; if (v > mx) mx = v;
+      const cm = +ym.slice(5, 7); calAmt[cm] = (calAmt[cm] || 0) + v; calCnt[cm] = (calCnt[cm] || 0) + 1;
+    }
+    if (total <= 0) continue; // no activity history → not shown
+    let observedTotal = 0; const activeCal = [];
+    for (let cm = 1; cm <= 12; cm++){ if (calCnt[cm]){ calAmt[cm] = Math.round(calAmt[cm] / calCnt[cm]); observedTotal += calAmt[cm]; activeCal.push(cm); } }
+    // Denominator = the category's OWN span (first time it appeared → the latest month
+    // of data), NOT the whole window. So a mortgage present every month reads at its
+    // real amount; only genuine gaps in a category's own life dilute it.
+    const spanMonths = Math.max(active, monthDiff(firstYM, lastYM) + 1);
+    const trulySeasonal = !!c.seasonal;
+    out[c.id] = { cat: c.id, trulySeasonal, calAmt, activeCal, active, spanMonths,
+                  annualizedMonthly: trulySeasonal ? Math.round(observedTotal / 12) : Math.round(total / spanMonths),
+                  perActiveMonth: activeCal.length ? Math.round(observedTotal / activeCal.length) : 0,
+                  min: mn === Infinity ? 0 : mn, max: mx };
+  }
+  return out;
+}
+// Honest pattern label for a category's recurring row.
+function catRecurLabel(info){
+  if (info.trulySeasonal){ const sl = seasonMonthsLabel(info.activeCal); return '🗓 ' + (sl || info.activeCal.length + ' mo/yr') + ' · ' + fmt$(info.perActiveMonth) + '/mo active'; }
+  if (info.active >= info.spanMonths) return 'monthly' + (info.min !== info.max ? ' · ' + fmt$(info.min) + '–' + fmt$(info.max) : '');
+  return 'seen ' + info.active + ' of ' + info.spanMonths + ' months';
+}
 function renderRecurringScreen(c){
-  const rec = detectRecurring();
-  if (!rec.length){
-    c.innerHTML = '<div class="empty">Nothing recurring detected yet.<br><span class="tiny">Needs a merchant (or a category, for check/ACH bills) seen in 3+ different months.</span></div>';
+  const catData = recurringCatData();
+  const catIds = Object.keys(catData);
+  const transfers = detectRecurring().filter((r) => r.kind === 'transfer');
+  if (!catIds.length && !transfers.length){
+    c.innerHTML = '<div class="empty">No recurring spending yet.<br><span class="tiny">Every category that isn’t marked one-time and has any history shows up here once you import or add transactions.</span></div>';
     return;
   }
-  const expenses = rec.filter((r) => r.kind === 'expense');
-  const transfers = rec.filter((r) => r.kind === 'transfer');
-  const byCat = {};
-  for (const r of expenses){ (byCat[r.cat] = byCat[r.cat] || []).push(r); }
-  const catTotal = (cid) => (byCat[cid] || []).reduce((s, r) => s + r.annualizedMonthly, 0);
-  const grandTotal = expenses.reduce((s, r) => s + r.annualizedMonthly, 0);
+  const catTotal = (cid) => (catData[cid] ? catData[cid].annualizedMonthly : 0);
+  const grandTotal = catIds.reduce((s, cid) => s + catData[cid].annualizedMonthly, 0);
 
   // A tree row. tog → collapsible (data-rtog); catId → tappable to edit that
-  // category (rename / mark seasonal); else a plain leaf.
+  // category (rename / mark seasonal / one-time); else a plain leaf.
   const trow = (icon, name, sub, amtStr, lvl, tog, open, catId) =>
     '<div class="tree-row ' + lvl + '"' + (tog ? ' data-rtog="' + esc(tog) + '" style="cursor:pointer"' : catId ? ' data-catedit="' + esc(catId) + '" style="cursor:pointer"' : ' style="cursor:default"') + '>' +
     '<span class="ic">' + icon + '</span><div class="body"><div class="t1">' + esc(name) + '</div>' +
     (sub ? '<div class="t2">' + esc(sub) + '</div>' : '') + '</div>' +
     '<span class="amt">' + amtStr + '</span>' + (tog ? '<span class="chev">' + (open ? '▾' : '▸') + '</span>' : '<span class="chev" style="opacity:.5">' + (catId ? '✎' : '') + '</span>') + '</div>';
 
-  // One category: a leaf if it has a single bill, else collapsible to its bills.
-  const catNode = (cid, lvl, deeper) => {
-    const items = byCat[cid], cl = catLabel(cid);
-    const amt = fmt$(catTotal(cid)) + '/mo';
-    if (items.length === 1) return trow(cl.icon, cl.name, recurCadenceLabel(items[0]), amt, lvl, null, false, cid);
-    const key = 'cat:' + cid, open = RECUR_OPEN.has(key);
-    let h = trow(cl.icon, cl.name, items.length + ' bills', amt, lvl, key, open);
-    if (open) for (const r of items.slice().sort((a, b) => b.annualizedMonthly - a.annualizedMonthly))
-      h += trow('•', r.label, recurCadenceLabel(r), fmt$(r.annualizedMonthly) + '/mo', deeper, null, false, r.cat);
-    return h;
-  };
+  // Each category is a leaf, tappable to edit (rename / seasonal / one-time).
+  const catNode = (cid, lvl) => { const cl = catLabel(cid);
+    return trow(cl.icon, cl.name, catRecurLabel(catData[cid]), fmt$(catData[cid].annualizedMonthly) + '/mo', lvl, null, false, cid); };
 
-  // Month-by-month expected recurring spend for budgeting. Seasonal bills land
-  // only in the months they actually occur; year-round bills spread evenly, so
-  // the variation you see across months IS the seasonal load. Sums to 12× the
-  // annualized total, so the headline and the breakdown always agree.
+  // Month-by-month expected recurring spend for budgeting. Seasonal categories land
+  // only in the months they actually occur; year-round ones spread evenly, so the
+  // variation you see across months IS the seasonal load. Sums to 12× the annualized
+  // total, so the headline and the breakdown always agree.
   const mbm = {};
   for (let cm = 1; cm <= 12; cm++) mbm[cm] = 0;
-  for (const r of expenses){
-    if (r.trulySeasonal){ for (let cm = 1; cm <= 12; cm++) if (r.calAmt[cm]) mbm[cm] += r.calAmt[cm]; }
-    else for (let cm = 1; cm <= 12; cm++) mbm[cm] += r.annualizedMonthly;
+  for (const cid of catIds){ const info = catData[cid];
+    if (info.trulySeasonal){ for (let cm = 1; cm <= 12; cm++) if (info.calAmt[cm]) mbm[cm] += info.calAmt[cm]; }
+    else for (let cm = 1; cm <= 12; cm++) mbm[cm] += info.annualizedMonthly;
   }
   const mbmMax = Math.max.apply(null, Object.keys(mbm).map((k) => mbm[k]).concat([1]));
   const nowCm = new Date().getMonth() + 1;
@@ -3282,7 +3313,7 @@ function renderRecurringScreen(c){
   let html = '<div class="card">' +
     '<div class="tree-row grp" data-rtog="mbm" style="cursor:pointer"><span class="ic">📅</span>' +
     '<div class="body"><div class="t1">Annualized average recurring</div>' +
-    '<div class="t2">seasonal bills spread across the year · tap for month-by-month</div></div>' +
+    '<div class="t2">every ongoing category, averaged per month · tap for month-by-month</div></div>' +
     '<span class="amt">' + fmt$(grandTotal) + '/mo</span><span class="chev">' + (mbmOpen ? '▾' : '▸') + '</span></div>';
   if (mbmOpen){
     html += '<div style="padding:6px 12px 12px">';
@@ -3297,11 +3328,11 @@ function renderRecurringScreen(c){
   }
   html += '</div>';
 
-  html += '<p class="tiny" style="margin:0 0 8px">Tap a group to drill down; tap a category (✎) to rename it or mark it <b>seasonal</b>. Seasonal bills (lawn, pool) spread across the year; regular bills like mortgage or car count every month even if one hasn’t hit yet.</p>' +
+  html += '<p class="tiny" style="margin:0 0 8px">Every category that isn’t one-time and has any history. Tap a group to expand; tap a category (✎) to rename it, mark it <b>seasonal</b>, or flag it one-time to remove it from here.</p>' +
     '<div class="card">';
   for (const g of GROUPS){
     if (g.kind === 'income' || g.kind === 'system') continue;
-    const gcats = Object.keys(byCat).filter((cid) => DATA.cats[cid] && DATA.cats[cid].group === g.id);
+    const gcats = catIds.filter((cid) => DATA.cats[cid] && DATA.cats[cid].group === g.id);
     if (!gcats.length) continue;
     const gTotal = gcats.reduce((s, cid) => s + catTotal(cid), 0);
     const gkey = 'g:' + g.id, gOpen = RECUR_OPEN.has(gkey);
@@ -3315,11 +3346,11 @@ function renderRecurringScreen(c){
       .concat(Object.keys(bySub).map((s) => ({ type: 'sub', s, cids: bySub[s], amt: bySub[s].reduce((x, cid) => x + catTotal(cid), 0) })))
       .sort((a, b) => b.amt - a.amt);
     for (const it of items){
-      if (it.type === 'cat') html += catNode(it.cid, 'tree-l1', 'tree-l2');
+      if (it.type === 'cat') html += catNode(it.cid, 'tree-l1');
       else {
         const skey = 'sub:' + g.id + '|' + it.s, sOpen = RECUR_OPEN.has(skey);
-        html += trow(subIcon(g.id, it.s), it.s, it.cids.length + ' categories', fmt$(it.amt) + '/mo', 'tree-l1', skey, sOpen);
-        if (sOpen) for (const cid of it.cids.slice().sort((a, b) => catTotal(b) - catTotal(a))) html += catNode(cid, 'tree-l2', 'tree-l3');
+        html += trow(subIcon(g.id, it.s), it.s, it.cids.length + ' categor' + (it.cids.length === 1 ? 'y' : 'ies'), fmt$(it.amt) + '/mo', 'tree-l1', skey, sOpen);
+        if (sOpen) for (const cid of it.cids.slice().sort((a, b) => catTotal(b) - catTotal(a))) html += catNode(cid, 'tree-l2');
       }
     }
   }
