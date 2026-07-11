@@ -279,7 +279,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v6.5'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v6.6'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1510,6 +1510,14 @@ function accountBalanceSeries(acct, year){
   // month-end. The anchor month itself includes any activity dated after the as-of date
   // (so a mid-May charge lands in May, not June); before any activity it equals the anchor.
   let pts = months.map((ym) => ({ ym, bal: anchored ? accountBalanceAt(acct, ym + '-31') : cumAt(ym) }));
+  // Opening baseline: if the very first tracked month already contains activity, prepend
+  // the balance as it stood the month before — the account's opening ($0 if it opened
+  // empty) — so the line rises FROM the opening instead of starting mid-air at a value.
+  if (pts.length){
+    const prevYM = shiftYM(minYM, -1);
+    const openBal = anchored ? accountBalanceAt(acct, prevYM + '-31') : cumAt(prevYM);
+    if (openBal != null && pts[0].bal !== openBal) pts.unshift({ ym: prevYM, bal: openBal });
+  }
   if (year && year !== 'all'){
     // Clamp to the year's activity range: first activity month (or the account's
     // opening if it opened that year) → last activity month. No leading carry-in.
@@ -1555,6 +1563,16 @@ function combinedBalanceSeries(year){
     for (const a of btcAccts){ const v = btcMaps[a.id][ym]; if (v != null) total += v; }
     return { ym, bal: total };
   });
+  // Opening baseline: net worth was $0 (or the sum of opening balances) before the first
+  // tracked month. If that first month already carries activity, prepend the prior-month
+  // total so the line starts from the opening instead of jumping to a value.
+  if (pts.length){
+    const prevYM = shiftYM(minYM, -1); let openBal = 0;
+    if (!valued) openBal = cumAt(prevYM);
+    else { for (const a of anchoredAccts) openBal += (accountBalanceAt(a, prevYM + '-31') || 0);
+      for (const a of btcAccts){ const v = btcMaps[a.id][prevYM]; if (v != null) openBal += v; } }
+    if (pts[0].bal !== openBal) pts.unshift({ ym: prevYM, bal: openBal });
+  }
   if (year && year !== 'all'){
     // Clamp to the year's activity range: first activity month (or an account opening
     // that year) → last activity month, so it aligns with the spending charts.
@@ -2498,7 +2516,7 @@ function renderAccountModal(c, acctId, close){
         '<div class="bl-tile"><div class="bl-v">' + fmt$(startBal) + '</div><div class="bl-l">Starting</div></div>' +
         '<div class="bl-tile"><div class="bl-v"' + (curBal < 0 ? ' style="color:var(--status-crit)"' : '') + '>' + fmt$(curBal) + '</div><div class="bl-l">Current</div></div>' +
         '<div class="bl-tile"><div class="bl-v" style="color:' + (delta >= 0 ? 'var(--status-good)' : 'var(--status-crit)') + '">' + fmt$(delta, { signed: true }) + '</div><div class="bl-l">Change</div></div></div>' +
-        '<p class="tiny" style="margin:8px 0 0">' + esc(acctTypeLabel(a.type)) + ' · ' + fmtMonth(kpts[0].ym) + ' → ' + fmtMonth(kpts[kpts.length - 1].ym) + '</p></div>';
+        '<p class="tiny" style="margin:8px 0 0">' + esc(acctTypeLabel(a.type)) + ' · ' + fmtMonth(a.anchorDate.slice(0, 7)) + ' → ' + fmtMonth(kpts[kpts.length - 1].ym) + '</p></div>';
     } else if (YEAR_LENS !== 'all' && !kpts.length){
       // Selected year predates this account's activity — don't pass off today's
       // balance as this year's. Say so plainly.
