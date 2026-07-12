@@ -251,11 +251,11 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 /* clickable chart legend (toggle a series on/off) */
 .legend.legend-toggle span{cursor:pointer; user-select:none; padding:2px 4px; border-radius:6px}
 .legend.legend-toggle span.off{opacity:.4; text-decoration:line-through}
-/* per-month toggle chips under the spending-vs-income chart */
-.month-chips{display:flex; flex-wrap:wrap; gap:6px; margin-top:10px}
-.month-chips .mchip{font-size:12px; font-weight:600; padding:4px 10px; border-radius:999px; border:1px solid var(--line);
-  background:var(--card2); color:var(--dim); cursor:pointer; user-select:none; white-space:nowrap}
-.month-chips .mchip.off{opacity:.45; text-decoration:line-through}
+/* a checkbox under each month, aligned to the chart's bar columns */
+.month-checks{display:flex; gap:0; margin:2px 0 4px; padding:0 6px}
+.month-checks .mcheck{flex:1 1 0; min-width:0; display:flex; flex-direction:column; align-items:center; gap:3px; cursor:pointer}
+.month-checks .mcheck span{font-size:10px; color:var(--faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%}
+.month-checks .mcheck input{width:16px; height:16px; margin:0; accent-color:var(--accent); cursor:pointer; flex-shrink:0}
 /* gift registry rows */
 .gift-row .gift-thx{cursor:pointer; font-size:18px; opacity:.85}
 .gift-row .gift-thx.on{opacity:1}
@@ -312,7 +312,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v7.10'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v7.11'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -3454,9 +3454,11 @@ function miniLineChart(months, series, fmtV, opts){
 function yearChartsHTML(agg, months, sel, baseline){
   // Pad so empty months (a partial year still shows Jan–Dec) read as $0, not crash.
   const src = agg; agg = {}; for (const ym of months) agg[ym] = src[ym] || EMPTY_AGG;
-  const allM = months.slice();              // every month in the lens — drives the toggle chips
-  months = months.filter((m) => !MONTH_OFF.has(m)); // months actually drawn
-  if (!months.length) months = allM.slice(); // never blank the chart entirely
+  // Every month stays a column (each gets its own checkbox below); a month unchecked
+  // (MONTH_OFF) just draws empty and drops out of the scale + averages.
+  const multiYr = new Set(months.map((m) => m.slice(0, 4))).size > 1;
+  const monthOn = (ym) => !MONTH_OFF.has(ym);
+  const onM = months.filter(monthOn);
   const si = months.indexOf(sel);
   const n = months.length;
   const padT = 16, padB = 22, padL = 6, padR = 6;
@@ -3467,12 +3469,12 @@ function yearChartsHTML(agg, months, sel, baseline){
   const visSp = (a) => (SVI_ON.rs ? Math.max(0, a.spendTotal - a.spendOneTime) : 0) + (SVI_ON.os ? Math.max(0, a.spendOneTime) : 0);
   const visIn = (a) => (SVI_ON.ri ? Math.max(0, a.incomeRecur) : 0) + (SVI_ON.oi ? Math.max(0, a.incomeTotal - a.incomeRecur) : 0);
   const showBudget = !!baseline && (SVI_ON.rs || SVI_ON.os);
-  // Average monthly out/in over the full (completed) months shown.
-  const curYM_ = currentYM(), fullM = months.filter((ym) => ym < curYM_), denomA = Math.max(1, fullM.length);
+  // Average monthly out/in over the full (completed) CHECKED months shown.
+  const curYM_ = currentYM(), fullM = onM.filter((ym) => ym < curYM_), denomA = Math.max(1, fullM.length);
   const avgSp = Math.round(fullM.reduce((s, ym) => s + visSp(agg[ym]), 0) / denomA);
   const avgIn = Math.round(fullM.reduce((s, ym) => s + visIn(agg[ym]), 0) / denomA);
   let maxV = 1;
-  for (const ym of months) maxV = Math.max(maxV, visSp(agg[ym]), visIn(agg[ym]));
+  for (const ym of onM) maxV = Math.max(maxV, visSp(agg[ym]), visIn(agg[ym]));
   if (showBudget) maxV = Math.max(maxV, baseline.total);
   maxV = Math.max(maxV, avgSp, avgIn);
   const colW = (W1 - padL - padR) / n;
@@ -3506,16 +3508,14 @@ function yearChartsHTML(agg, months, sel, baseline){
   };
   months.forEach((ym, i) => {
     const cx = padL + i * colW + colW / 2;
-    const a = agg[ym], selected = ym === sel;
-    const spendRecur = SVI_ON.rs ? Math.max(0, a.spendTotal - a.spendOneTime) : 0, spendOne = SVI_ON.os ? Math.max(0, a.spendOneTime) : 0;
-    const incRecur = SVI_ON.ri ? Math.max(0, a.incomeRecur) : 0, incOne = SVI_ON.oi ? Math.max(0, a.incomeTotal - a.incomeRecur) : 0;
+    const a = agg[ym], selected = ym === sel, off = !monthOn(ym);
+    const spendRecur = (off || !SVI_ON.rs) ? 0 : Math.max(0, a.spendTotal - a.spendOneTime), spendOne = (off || !SVI_ON.os) ? 0 : Math.max(0, a.spendOneTime);
+    const incRecur = (off || !SVI_ON.ri) ? 0 : Math.max(0, a.incomeRecur), incOne = (off || !SVI_ON.oi) ? 0 : Math.max(0, a.incomeTotal - a.incomeRecur);
     // Full-column hit target FIRST (below), so clicks in empty space still open
     // the month; segments drawn on top own hover + their own clicks.
     s1 += '<rect data-m="' + ym + '" x="' + (padL + i * colW).toFixed(1) + '" y="0" width="' + colW.toFixed(1) + '" height="' + H1 + '" fill="transparent" pointer-events="all" style="cursor:pointer"/>';
     s1 += stackBar(cx - barW - 1, ym, [{ v: spendRecur, color: 'var(--viz-1)', label: 'Recurring spend', sign: '−' }, { v: spendOne, color: 'var(--viz-1)', label: 'One-time spend', sign: '−' }], selected);
     s1 += stackBar(cx + 1, ym, [{ v: incRecur, color: 'var(--viz-2)', label: 'Recurring income', sign: '+' }, { v: incOne, color: 'var(--viz-2)', label: 'One-off income', sign: '+' }], selected);
-    if (n <= 8 || i % 2 === 0 || ym === sel)
-      s1 += '<text x="' + cx.toFixed(1) + '" y="' + (H1 - 6) + '" text-anchor="middle" font-size="10" fill="var(--faint)" pointer-events="none">' + fmtMonth(ym).slice(0, 3) + '</text>';
     if (ym === sel)
       s1 += '<rect x="' + (cx - colW / 2 + 3).toFixed(1) + '" y="' + (H1 - padB + 3) + '" width="' + (colW - 6).toFixed(1) + '" height="2" rx="1" fill="var(--accent)" pointer-events="none"/>';
   });
@@ -3530,21 +3530,21 @@ function yearChartsHTML(agg, months, sel, baseline){
     avgSp > 0 ? { c: 'var(--viz-1)', label: 'avg out ' + fmt$(avgSp) } : null,
     avgIn > 0 ? { c: 'var(--viz-2)', label: 'avg in ' + fmt$(avgIn) } : null,
     showBudget ? { c: 'var(--faint)', label: 'budget ' + fmt$(baseline.total) } : null ]);
-  // Per-month toggle chips (drive MONTH_OFF): tap to drop a month from the bars, scale and averages.
-  const multiYr = new Set(allM.map((m) => m.slice(0, 4))).size > 1;
-  const mchips = allM.length > 1
-    ? '<div class="month-chips">' + allM.map((ym) => '<span class="mchip' + (MONTH_OFF.has(ym) ? ' off' : '') + '" data-mtog="' + ym + '">' +
-        esc(fmtMonth(ym).slice(0, 3) + (multiYr ? ' ’' + ym.slice(2, 4) : '')) + '</span>').join('') + '</div>'
-    : '';
+  // A checkbox directly under each month (aligned to its bar column). Unchecking drops
+  // that month from the bars, the scale and the averages.
+  const mchecks = '<div class="month-checks">' + months.map((ym) =>
+    '<label class="mcheck"><span>' + esc(fmtMonth(ym).slice(0, 3) + (multiYr ? ' ’' + ym.slice(2, 4) : '')) + '</span>' +
+    '<input type="checkbox" data-mtog="' + ym + '"' + (monthOn(ym) ? ' checked' : '') + '></label>').join('') + '</div>';
   const card1 =
     '<div class="card"><h3>Spending vs income</h3>' +
     '<div class="chart-wrap"><svg viewBox="0 0 ' + W1 + ' ' + H1 + '" width="100%" xmlns="http://www.w3.org/2000/svg">' + s1 + '</svg></div>' +
+    mchecks +
     '<div class="legend legend-toggle">' +
       '<span data-svi="rs"' + (SVI_ON.rs ? '' : ' class="off"') + '><i style="background:var(--viz-1)"></i>Recurring spend</span>' +
       '<span data-svi="os"' + (SVI_ON.os ? '' : ' class="off"') + '><i style="background:var(--viz-1);opacity:.5"></i>One-time spend</span>' +
       '<span data-svi="ri"' + (SVI_ON.ri ? '' : ' class="off"') + '><i style="background:var(--viz-2)"></i>Recurring income</span>' +
-      '<span data-svi="oi"' + (SVI_ON.oi ? '' : ' class="off"') + '><i style="background:var(--viz-2);opacity:.5"></i>One-off income</span></div>' + refs1 + mchips +
-    '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Tap a legend item or month to show/hide it · tap a bar to open that month.</span></div></div>';
+      '<span data-svi="oi"' + (SVI_ON.oi ? '' : ' class="off"') + '><i style="background:var(--viz-2);opacity:.5"></i>One-off income</span></div>' + refs1 +
+    '<div class="chart-caption" style="min-height:0"><span style="color:var(--faint)">Uncheck a month or tap a legend item to hide it · tap a bar to open that month.</span></div></div>';
 
   return card1;
 }
