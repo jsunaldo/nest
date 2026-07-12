@@ -312,7 +312,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v7.11'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v7.12'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 const LSKEY = 'nest.data';
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -4266,24 +4266,33 @@ function renderHealthScreen(c){
     '<b>A month with zero transactions almost always means a missing statement</b> — gaps silently skew averages, the baseline and the yearly forecast.</p>' +
     (rv ? '<p class="tiny" style="margin:0 0 10px">Also: ' + rv + ' transactions still in review — unsorted money sits out of all totals until sorted.</p>' : '');
 
-  // Money-in filed under spending categories: each one REDUCES that month's
-  // spend by its full amount — the #1 cause of impossible negative months.
+  // Money-in filed under spending categories. A refund that just OFFSETS a still-positive
+  // category is correct (it nets against that spend). It only breaks the math when a
+  // category takes in MORE than it spends (net ≤ 0) — mistyped, or a backwards import.
   const agg = buildMonthAgg();
   const negMonths = Object.keys(agg).filter((ym) => agg[ym].spendTotal < 0).sort();
-  const susp = txns.filter((t) => {
-    if (t.status === 'excluded' || t.amt < 10000) return false; // inflows >= $100 only
-    return effParts(t).some((p) => p.cat && p.cat !== '__uncat' && catKind(p.cat) === 'expense' && p.amt > 0);
-  }).sort((a, b) => b.amt - a.amt);
-  if (negMonths.length || susp.length){
+  const catNet = {};
+  for (const ym in agg) for (const cid in agg[ym].spend) catNet[cid] = (catNet[cid] || 0) + agg[ym].spend[cid];
+  const catBad = (cid) => cid && cid !== '__uncat' && catKind(cid) === 'expense' && (catNet[cid] || 0) <= 0;
+  const inflow = txns.filter((t) => t.status !== 'excluded' && t.amt >= 10000 &&
+    effParts(t).some((p) => p.amt > 0 && p.cat && p.cat !== '__uncat' && catKind(p.cat) === 'expense')).sort((a, b) => b.amt - a.amt);
+  const breaking = inflow.filter((t) => effParts(t).some((p) => p.amt > 0 && catBad(p.cat))); // net-negative category
+  const refundy = inflow.filter((t) => breaking.indexOf(t) < 0);                              // offsets a healthy category
+  if (negMonths.length || breaking.length){
     html += '<div class="card" style="border-color:var(--status-crit)"><h3>⚠️ Math-breaking anomalies</h3>' +
       (negMonths.length ? '<p style="margin:0 0 8px">' + negMonths.map(fmtMonth).join(', ') +
         (negMonths.length > 1 ? ' have' : ' has') + ' <b>negative total spending</b>.</p>' : '') +
-      (susp.length ? '<p class="muted" style="margin:0 0 8px">These show as <b>money IN</b> but sit in an <b>Expense-type</b> category, so each subtracts from that month. Fixes: ' +
+      (breaking.length ? '<p class="muted" style="margin:0 0 8px">These are <b>money IN</b> in an <b>Expense-type</b> category that now takes in more than it spends, so its total goes negative. Fixes: ' +
         '(1) if the whole category is really income — e.g. Seed Money — change its <b>Type</b> to Income in Categories &amp; Rules (fixes all at once); ' +
-        '(2) if just this item is an inflow, recategorize it; ' +
-        '(3) if it was an expense imported backwards, open it and tap <b>⇄ Flip</b>. Small refunds are fine. Tap any to fix:</p>' +
-        susp.slice(0, 12).map((t) => txnRowHTML(t)).join('') : '') +
+        '(2) if just this item is income, recategorize it; ' +
+        '(3) if it was an expense imported backwards, open it and tap <b>⇄ Flip</b>. Tap any to fix:</p>' +
+        breaking.slice(0, 12).map((t) => txnRowHTML(t)).join('') : '') +
       '</div>';
+  }
+  if (refundy.length){
+    html += '<div class="card"><h3>↩️ Refunds &amp; credits</h3>' +
+      '<p class="muted" style="margin:0 0 8px"><b>' + refundy.length + '</b> money-IN item' + (refundy.length > 1 ? 's' : '') + ' sit in expense categories — a return, rebate or credit. <b>This is correct</b>: each nets against that category’s spending, so your net cost stays right. Nothing is broken — leave them. Only change one if it’s actually <b>income</b> — e.g. gift money you received (a Venmo cash-out of wedding gifts) — then tap it and recategorize.</p>' +
+      refundy.slice(0, 10).map((t) => txnRowHTML(t)).join('') + '</div>';
   }
   for (const a of accts){
     const mine = txns.filter((t) => t.acct === a.id);
