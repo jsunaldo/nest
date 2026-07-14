@@ -1,6 +1,6 @@
 // Nest service worker — cache-first for same-origin assets, network-first for
 // navigation (falling back to cache offline). Never caches the sync worker origin.
-const CACHE_NAME = 'nest-v73';
+const CACHE_NAME = 'nest-v74';
 const PRECACHE = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 const SYNC_ORIGIN = 'workers.dev';
 
