@@ -38,6 +38,10 @@ header.app .logo .egg{color:var(--accent)}
 header.app .spacer{flex:1}
 .sync-chip{font-size:12px; color:var(--dim); background:var(--card); border:1px solid var(--line);
   border-radius:999px; padding:4px 10px; display:flex; align-items:center; gap:6px; cursor:pointer}
+/* which ledger you're in — tap to switch; personal mode is loud so entries never land in the wrong ledger */
+.ws-chip{font-size:12px; font-weight:600; color:var(--dim); background:var(--card); border:1px solid var(--line);
+  border-radius:999px; padding:4px 10px; margin-right:6px; cursor:pointer; white-space:nowrap; user-select:none}
+.ws-chip.personal{color:var(--accent); border-color:var(--accent); background:rgba(240,200,90,.10)}
 .sync-chip .dot{width:8px; height:8px; border-radius:50%; background:var(--faint)}
 .sync-chip.synced .dot{background:var(--green)} .sync-chip.syncing .dot{background:var(--accent); animation:pulse 1s infinite}
 .sync-chip.offline .dot{background:var(--red)} .sync-chip.locked .dot{background:var(--red)}
@@ -282,6 +286,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
   <header class="app">
     <div class="logo"><span class="egg">🪺</span> Nest</div>
     <div class="spacer"></div>
+    <div class="ws-chip" id="ws-chip" title="Switch between the shared and personal ledgers"></div>
     <div class="sync-chip" id="sync-chip" onclick="openSyncSettings()"><span class="dot"></span><span id="sync-label">local</span></div>
   </header>
 
@@ -316,9 +321,21 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v7.13'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v8.0'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
-const LSKEY = 'nest.data';
+// ---- Workspaces: 'main' = the shared household ledger (legacy keys, syncs with the
+// shared passphrase) and 'personal' = a fully separate ledger with its OWN storage and
+// its OWN sync room/passphrase — nothing crosses between them. 'nest.ws' is a device-
+// level pointer; switching saves, flips it and reloads so every global reboots clean.
+const WS = localStorage.getItem('nest.ws') === 'personal' ? 'personal' : 'main';
+const LSKEY  = WS === 'personal' ? 'nest.p.data' : 'nest.data';
+const PASSKEY = WS === 'personal' ? 'nest.p.pass' : 'nest.pass';
+const VERKEY  = WS === 'personal' ? 'nest.p.ver'  : 'nest.ver';
+function switchWorkspace(to){
+  try { saveNow(); } catch (e) {}
+  localStorage.setItem('nest.ws', to === 'personal' ? 'personal' : 'main');
+  location.reload();
+}
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
 const TOMBSTONE_DAYS = 90;
 
@@ -1262,7 +1279,7 @@ async function decryptEnvelope(env){
 // entity-by-entity (last-write-wins on updatedAt, tombstones included), then
 // pushes; a 409 means someone else pushed first -> re-pull, re-merge, retry once.
 const SYNC = { status: 'local', dirty: false, inflight: false,
-               serverVer: +(localStorage.getItem('nest.ver') || 0) };
+               serverVer: +(localStorage.getItem(VERKEY) || 0) };
 function setSync(status){
   SYNC.status = status;
   const chip = $('#sync-chip');
@@ -1297,7 +1314,7 @@ async function syncPull(quiet){
     if (!res.ok) throw 0;
     const body = await res.json();
     SYNC.serverVer = body.ver || 0;
-    localStorage.setItem('nest.ver', SYNC.serverVer);
+    localStorage.setItem(VERKEY, SYNC.serverVer);
     let changed = false;
     if (body.env){
       const remote = await decryptEnvelope(body.env); // throws on corrupt/wrong key
@@ -1332,7 +1349,7 @@ async function syncPush(){
       if (!res.ok) throw 0;
       const body = await res.json();
       SYNC.serverVer = body.ver;
-      localStorage.setItem('nest.ver', body.ver);
+      localStorage.setItem(VERKEY, body.ver);
       setSync('synced');
       return;
     }
@@ -1345,14 +1362,14 @@ async function syncPush(){
 }
 const schedulePush = debounce(() => { syncPush(); }, 2500);
 async function enableSync(pass){
-  localStorage.setItem('nest.pass', pass);
+  localStorage.setItem(PASSKEY, pass);
   CRYPTO = await deriveKeys(pass);
   if (countEntities(DATA) > 0) SYNC.dirty = true;
   try { await syncPull(); } catch (e) {}
   if (SYNC.dirty) await syncPush();
 }
 function disableSync(){
-  localStorage.removeItem('nest.pass');
+  localStorage.removeItem(PASSKEY);
   CRYPTO = null;
   SYNC.dirty = false;
   setSync('local');
@@ -1360,11 +1377,11 @@ function disableSync(){
 
 /* ============================ BACKUP ============================ */
 function exportBackup(){
-  const blob = new Blob([JSON.stringify({ app: 'nest', v: 1, exportedAt: nowISO(), data: DATA }, null, 1)],
+  const blob = new Blob([JSON.stringify({ app: 'nest', v: 1, ws: WS, exportedAt: nowISO(), data: DATA }, null, 1)],
     { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'nest-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+  a.download = 'nest-' + (WS === 'personal' ? 'personal-' : '') + 'backup-' + new Date().toISOString().slice(0, 10) + '.json';
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
@@ -2233,12 +2250,17 @@ function renderHome(){
   const c = $('#view-home');
   const all = liveTxns();
   if (!all.length){
-    c.innerHTML =
-      '<div class="card"><h3>Welcome to Nest 🪺</h3>' +
-      '<p style="margin:0 0 8px">Every dollar you two spend — one place, both phones.</p>' +
-      '<p class="muted" style="margin:0 0 4px">1. Import bank / card CSV statements below</p>' +
-      '<p class="muted" style="margin:0 0 4px">2. Sort the few it can’t auto-categorize (Review tab)</p>' +
-      '<p class="muted" style="margin:0">3. Set your baseline in More → Budgets, turn on Sync to share</p></div>' +
+    c.innerHTML = (WS === 'personal'
+      ? '<div class="card" style="border-color:var(--accent)"><h3>🔒 Your personal ledger</h3>' +
+        '<p style="margin:0 0 8px">A fully separate space — its own accounts, its own numbers, its own optional sync passphrase. The shared household ledger never sees any of it.</p>' +
+        '<p class="muted" style="margin:0 0 4px">1. Import your personal bank / card CSVs below (or ＋Add in Activity)</p>' +
+        '<p class="muted" style="margin:0 0 4px">2. Sort anything unrecognized in Review</p>' +
+        '<p class="muted" style="margin:0">3. Optional: More → Sync with a passphrase <b>only you know</b> to back it up</p></div>'
+      : '<div class="card"><h3>Welcome to Nest 🪺</h3>' +
+        '<p style="margin:0 0 8px">Every dollar you two spend — one place, both phones.</p>' +
+        '<p class="muted" style="margin:0 0 4px">1. Import bank / card CSV statements below</p>' +
+        '<p class="muted" style="margin:0 0 4px">2. Sort the few it can’t auto-categorize (Review tab)</p>' +
+        '<p class="muted" style="margin:0">3. Set your baseline in More → Budgets, turn on Sync to share</p></div>') +
       '<button class="btn btn-primary btn-block" data-x="import">📥 Import statements</button>';
     c.querySelector('[data-x=import]').onclick = () => openScreen('Import', renderImportScreen);
     return;
@@ -3607,10 +3629,17 @@ function renderMore(){
     ['☁️', 'Sync', 'Status: ' + SYNC.status, () => openScreen('Sync', renderSyncScreen)],
     ['💾', 'Backup', 'Export / import everything', () => openScreen('Backup', renderBackupScreen)],
   ];
-  c.innerHTML = '<div class="card">' + items.map((it, i) =>
+  const wsCard = '<div class="card"' + (WS === 'personal' ? ' style="border-color:var(--accent)"' : '') + '>' +
+    '<div class="row"><span class="grow"><b>' + (WS === 'personal' ? '🔒 Personal ledger' : '🏠 Shared household ledger') + '</b>' +
+    '<div class="tiny" style="margin-top:3px">' + (WS === 'personal'
+      ? 'Your own accounts &amp; spending — separate storage, separate sync passphrase. The shared ledger never sees it.'
+      : 'The ledger you and Shannon share. Your personal ledger is a separate space with its own passphrase.') + '</div></span>' +
+    '<button class="btn btn-sm" data-x="wsw">Switch to ' + (WS === 'personal' ? '🏠 Shared' : '🔒 Personal') + '</button></div></div>';
+  c.innerHTML = wsCard + '<div class="card">' + items.map((it, i) =>
     '<div class="list-item" data-mi="' + i + '"><span class="ic">' + it[0] + '</span><div class="body"><div class="t1">' + it[1] +
     '</div><div class="t2">' + esc(it[2]) + '</div></div><span class="menu-chev">›</span></div>').join('') + '</div>' +
-    '<p class="tiny" style="text-align:center">Nest ' + BUILD + ' — local-first · E2E-encrypted sync</p>';
+    '<p class="tiny" style="text-align:center">Nest ' + BUILD + ' — local-first · E2E-encrypted sync · ' + (WS === 'personal' ? 'personal ledger' : 'shared ledger') + '</p>';
+  c.querySelector('[data-x=wsw]').onclick = () => switchWorkspace(WS === 'personal' ? 'main' : 'personal');
   c.querySelectorAll('[data-mi]').forEach((n2) => { n2.onclick = () => items[+n2.dataset.mi][3](); });
 }
 
@@ -4368,7 +4397,9 @@ function renderSyncScreen(c){
     (CRYPTO ? '🔒 Sync is ON — room <span class="rule-pat">' + CRYPTO.roomId.slice(0, 8) + '…</span> · ' + esc(SYNC.status)
             : 'Sync is off — data lives only on this device.') + '</p>' +
     '<p class="muted" style="margin:8px 0 0">End-to-end encrypted: the passphrase never leaves your devices — the server stores only ciphertext. ' +
-    'Use the <b>same passphrase on both phones</b> to share one ledger.</p></div>';
+    (WS === 'personal'
+      ? 'This is your <b>🔒 Personal ledger</b> — use a passphrase <b>only you know</b> (NOT the household one). It gets its own private room; the shared ledger and other phones never see it.'
+      : 'Use the <b>same passphrase on both phones</b> to share one ledger.') + '</p></div>';
   if (!CRYPTO){
     html += '<div class="card"><h3>Enable sync</h3>' +
       '<label class="fld"><span>Shared passphrase — min 8 chars, try 4 random words</span><input type="password" data-x="p1" autocomplete="off"></label>' +
@@ -4387,6 +4418,13 @@ function renderSyncScreen(c){
       const p1 = q('[data-x=p1]').value, p2 = q('[data-x=p2]').value;
       if (p1.length < 8){ toast('Passphrase must be at least 8 characters'); return; }
       if (p1 !== p2){ toast('Passphrases don’t match'); return; }
+      // Same passphrase = same sync room: the two ledgers would merge into one blob.
+      const other = localStorage.getItem(WS === 'personal' ? 'nest.pass' : 'nest.p.pass');
+      if (other && p1 === other){
+        toast(WS === 'personal' ? 'That’s the household passphrase — the personal ledger needs its own, or the two would merge.'
+                                : 'That’s the personal-ledger passphrase — the shared ledger needs a different one.');
+        return;
+      }
       const btn = q('[data-x=en]');
       btn.disabled = true; btn.textContent = 'Setting up…';
       try {
@@ -4461,11 +4499,19 @@ if ('serviceWorker' in navigator){
   });
 }
 {
-  const pass = localStorage.getItem('nest.pass');
+  const pass = localStorage.getItem(PASSKEY);
   if (pass) deriveKeys(pass).then((k) => {
     CRYPTO = k;
     syncPull().then(() => { if (SYNC.dirty) syncPush(); }).catch(() => {});
   });
+  // Workspace chip: shows which ledger you're in; tap to switch. The personal ledger
+  // is a completely separate store + sync room — see switchWorkspace().
+  const wc = $('#ws-chip');
+  if (wc){
+    wc.innerHTML = WS === 'personal' ? '🔒 Personal' : '🏠 Shared';
+    if (WS === 'personal'){ wc.classList.add('personal'); document.title = 'Nest — Personal'; }
+    wc.onclick = () => switchWorkspace(WS === 'personal' ? 'main' : 'personal');
+  }
 }
 document.addEventListener('visibilitychange', () => {
   if (document.hidden){ saveNow(); }

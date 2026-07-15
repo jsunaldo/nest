@@ -6,6 +6,16 @@ with rules, review the stragglers card-by-card, and watch spending against your
 
 **Live:** https://jsunaldo.github.io/nest · **Sync worker:** `nest-sync` (Cloudflare)
 
+## Two ledgers
+
+The header chip switches between **🏠 Shared** (the household ledger you both sync)
+and **🔒 Personal** (a fully separate ledger with its own storage and its own sync
+passphrase — the shared room never sees it). Each ledger has its own accounts,
+transactions, categories, budgets and backups. Use a **different** passphrase for
+each; the app refuses the same one, since identical passphrases would land both
+ledgers in the same sync room. Note: switching is one tap with no lock — "personal"
+means *separate*, not *hidden from someone holding your unlocked phone*.
+
 ## Privacy model
 
 - This repo holds **code only**. Financial data never touches GitHub.
