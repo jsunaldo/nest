@@ -321,19 +321,29 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v8.0'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v8.1'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 // ---- Workspaces: 'main' = the shared household ledger (legacy keys, syncs with the
 // shared passphrase) and 'personal' = a fully separate ledger with its OWN storage and
 // its OWN sync room/passphrase — nothing crosses between them. 'nest.ws' is a device-
 // level pointer; switching saves, flips it and reloads so every global reboots clean.
-const WS = localStorage.getItem('nest.ws') === 'personal' ? 'personal' : 'main';
+// A tab pins its ledger in sessionStorage so a reload it didn't ask for (the service
+// worker's silent auto-update, F5) can never rebind it to whatever ledger another tab
+// selected last. The localStorage pointer is only the default for NEW tabs/launches.
+let WS_TAB = null; try { WS_TAB = sessionStorage.getItem('nest.ws'); } catch (e) {}
+const WS = (WS_TAB || localStorage.getItem('nest.ws')) === 'personal' ? 'personal' : 'main';
+try { sessionStorage.setItem('nest.ws', WS); } catch (e) {}
 const LSKEY  = WS === 'personal' ? 'nest.p.data' : 'nest.data';
 const PASSKEY = WS === 'personal' ? 'nest.p.pass' : 'nest.pass';
 const VERKEY  = WS === 'personal' ? 'nest.p.ver'  : 'nest.ver';
 function switchWorkspace(to){
-  try { saveNow(); } catch (e) {}
-  localStorage.setItem('nest.ws', to === 'personal' ? 'personal' : 'main');
+  saveNow();
+  // saveData swallows quota errors into SAVE_FAILED — if this ledger couldn't be
+  // persisted, abort the switch instead of reloading over the unsaved edits.
+  if (SAVE_FAILED){ toast('⚠️ Couldn’t save this ledger — switch cancelled so nothing is lost. Free up space or export a backup, then try again.'); return; }
+  const v = to === 'personal' ? 'personal' : 'main';
+  try { sessionStorage.setItem('nest.ws', v); } catch (e) {}
+  localStorage.setItem('nest.ws', v);
   location.reload();
 }
 const SEED_TS = '2020-01-01T00:00:00.000Z'; // seeds always lose merges to real edits
@@ -1244,11 +1254,16 @@ let CRYPTO = null;
 async function deriveKeys(pass){
   const te = new TextEncoder();
   const km = await crypto.subtle.importKey('raw', te.encode(pass), 'PBKDF2', false, ['deriveBits']);
+  // The personal workspace mixes a domain tag into the KDF, so even the IDENTICAL
+  // passphrase derives a different key, token and room than the shared ledger — the
+  // two rooms can never collide/merge by construction, not just by the UI guard.
+  // 'main' keeps the legacy byte-exact derivation so existing household rooms work.
+  const dom = WS === 'personal' ? '|personal' : '';
   const bits = new Uint8Array(await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt: te.encode('nest-ledger-v1|salt'), iterations: KDF_ITER, hash: 'SHA-256' }, km, 512));
+    { name: 'PBKDF2', salt: te.encode('nest-ledger-v1|salt' + dom), iterations: KDF_ITER, hash: 'SHA-256' }, km, 512));
   const authToken = hex(bits.slice(0, 32));
   const aesKey = await crypto.subtle.importKey('raw', bits.slice(32, 64), 'AES-GCM', false, ['encrypt', 'decrypt']);
-  const roomBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode('nest-room|' + authToken)));
+  const roomBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode('nest-room|' + (WS === 'personal' ? 'p|' : '') + authToken)));
   return { authToken, aesKey, roomId: hex(roomBytes).slice(0, 24) };
 }
 async function maybeGzip(bytes){
@@ -1390,6 +1405,11 @@ function importBackup(text, mode){
   try { obj = JSON.parse(text); } catch (e) { return { error: 'Not valid JSON' }; }
   const data = obj && obj.app === 'nest' ? obj.data : obj;
   if (!data || typeof data !== 'object' || !data.txns) return { error: 'Not a Nest backup' };
+  // A backup carries its ledger (ws, since v8.0). Importing it into the OTHER ledger
+  // would cross-contaminate — and then sync the contamination to that ledger's room.
+  // Pre-v8.0 backups have no ws field and still import anywhere.
+  if (obj && obj.app === 'nest' && obj.ws && obj.ws !== WS)
+    return { error: 'That’s a ' + (obj.ws === 'personal' ? '🔒 Personal' : '🏠 Shared') + '-ledger backup — nothing was imported. Switch ledgers (tap the chip up top), then import it there.' };
   if (mode === 'replace'){
     DATA = data;
     for (const m of SYNC_MAPS) DATA[m] = DATA[m] || {};
@@ -3627,7 +3647,7 @@ function renderMore(){
     ['🩺', 'Data health', 'Find missing statements & gaps', () => openScreen('Data health', renderHealthScreen)],
     ['🤖', 'Claude bulk triage', 'Sort many merchants at once', () => openScreen('Claude bulk triage', renderClaudeScreen)],
     ['☁️', 'Sync', 'Status: ' + SYNC.status, () => openScreen('Sync', renderSyncScreen)],
-    ['💾', 'Backup', 'Export / import everything', () => openScreen('Backup', renderBackupScreen)],
+    ['💾', 'Backup', 'Export / import this ledger', () => openScreen('Backup', renderBackupScreen)],
   ];
   const wsCard = '<div class="card"' + (WS === 'personal' ? ' style="border-color:var(--accent)"' : '') + '>' +
     '<div class="row"><span class="grow"><b>' + (WS === 'personal' ? '🔒 Personal ledger' : '🏠 Shared household ledger') + '</b>' +
@@ -4402,7 +4422,7 @@ function renderSyncScreen(c){
       : 'Use the <b>same passphrase on both phones</b> to share one ledger.') + '</p></div>';
   if (!CRYPTO){
     html += '<div class="card"><h3>Enable sync</h3>' +
-      '<label class="fld"><span>Shared passphrase — min 8 chars, try 4 random words</span><input type="password" data-x="p1" autocomplete="off"></label>' +
+      '<label class="fld"><span>' + (WS === 'personal' ? 'Personal passphrase — yours alone, NOT the household one' : 'Shared passphrase') + ' — min 8 chars, try 4 random words</span><input type="password" data-x="p1" autocomplete="off"></label>' +
       '<label class="fld"><span>Repeat it</span><input type="password" data-x="p2" autocomplete="off"></label>' +
       '<button class="btn btn-primary btn-block" data-x="en">Enable sync</button>' +
       '<p class="tiny" style="margin:8px 0 0">Write it down — there is no reset. A lost passphrase = a new empty sync room.</p></div>';
@@ -4451,9 +4471,9 @@ function renderSyncScreen(c){
 /* ---- Backup screen ---- */
 function renderBackupScreen(c){
   c.innerHTML =
-    '<div class="card"><h3>Export</h3><p class="muted" style="margin:0 0 10px">Plain-JSON snapshot of everything — keep it somewhere private.</p>' +
+    '<div class="card"><h3>Export</h3><p class="muted" style="margin:0 0 10px">Plain-JSON snapshot of the <b>' + (WS === 'personal' ? '🔒 Personal' : '🏠 Shared') + '</b> ledger only — the other ledger needs its own export. Keep it somewhere private.</p>' +
     '<button class="btn btn-primary btn-block" data-x="ex">⬇️ Export backup file</button></div>' +
-    '<div class="card"><h3>Import</h3><p class="muted" style="margin:0 0 10px">Merge combines with what’s here (newest edit wins). Replace wipes this device first.</p>' +
+    '<div class="card"><h3>Import</h3><p class="muted" style="margin:0 0 10px">Merge combines with what’s here (newest edit wins). Replace wipes this ledger on this device first — the other ledger is untouched.</p>' +
     '<div class="row"><button class="btn grow" data-x="im">Import & merge</button>' +
     '<button class="btn btn-danger grow" data-x="ir">Replace…</button></div></div>';
   const fi = document.createElement('input');
@@ -4464,7 +4484,7 @@ function renderBackupScreen(c){
   c.querySelector('[data-x=ex]').onclick = () => exportBackup();
   c.querySelector('[data-x=im]').onclick = () => pick('merge');
   c.querySelector('[data-x=ir]').onclick = async () => {
-    if (await confirmDlg('Replace ALL data on this device with the backup file?', 'Replace')) pick('replace');
+    if (await confirmDlg('Replace the ' + (WS === 'personal' ? 'Personal' : 'Shared') + ' ledger on this device with the backup file? Your other ledger is not affected.', 'Replace')) pick('replace');
   };
   fi.onchange = async () => {
     const f = fi.files && fi.files[0];
