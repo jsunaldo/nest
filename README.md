@@ -24,11 +24,20 @@ phone*.
 - This repo holds **code only**. Financial data never touches GitHub.
 - Data lives in each device's local storage.
 - Sync (optional) pushes an **AES-256-GCM encrypted blob** to a Cloudflare Worker.
-  The encryption key is derived from your shared passphrase and never leaves your
-  devices — the server sees ciphertext, an entity count, and nothing else.
+  The encryption key is derived (PBKDF2-SHA256, 600k iterations for new rooms) from
+  your passphrase and never leaves your devices — the server never sees plaintext or
+  the passphrase. Alongside the ciphertext it does store a small amount of metadata:
+  an entity **count**, a **version counter**, per-write timestamps, and a rolling ring
+  of up to **10 encrypted backup snapshots** (wipe protection). All of it is useless
+  without the passphrase.
 - The room is claimed by the first writer's derived token; other passphrases get
   locked out. **There is no passphrase reset** — a lost passphrase means starting a
   new sync room (your local data is untouched).
+- **Erasing the server copy:** More → Sync → *Disconnect & erase server copy* deletes
+  the blob **and** every backup from the server (auth-gated by your passphrase). Use it
+  if a passphrase may be exposed, then re-enable with a new one — that's the rotation
+  path. A plain *Disconnect* leaves the encrypted copy on the server so your other
+  phone keeps working.
 
 ## Getting started (both phones)
 

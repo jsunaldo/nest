@@ -321,7 +321,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v8.1'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v8.2'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 // ---- Workspaces: 'main' = the shared household ledger (legacy keys, syncs with the
 // shared passphrase) and 'personal' = a fully separate ledger with its OWN storage and
@@ -520,6 +520,7 @@ function ymRange(fromYM, toYM){ const out = []; let cur = fromYM;
 /* ============================ STATE & STORE ============================ */
 let DATA = null;
 const UI = { month: currentYM() };
+let PENDING_RELOAD = false; // a new app version is ready but a modal/failed-save deferred the reload
 
 function loadData(){
   const raw = localStorage.getItem(LSKEY);
@@ -534,7 +535,10 @@ function loadData(){
   for (const m of SYNC_MAPS) DATA[m] = DATA[m] || {};
   seedIfEmpty();
   runMigrations();
-  purgeTombstones();
+  // Only purge tombstones on a LOCAL-only ledger. Under sync the next pull re-adopts
+  // every purged tombstone from the room anyway (so it's a durable no-op), and purging
+  // before that pull can let a long-dormant device resurrect an entity a peer deleted.
+  if (!localStorage.getItem(PASSKEY)) purgeTombstones();
 }
 // One-time, versioned data reshapes. Runs after seed so it can reorganize the
 // seed categories on both new and existing installs.
@@ -601,11 +605,49 @@ function renameSub(groupId, oldSub, newSub){
 }
 const CATS_OPEN = new Set(); // collapsible tree state: 'g:<gid>' and 'sub:<gid>|<sub>'
 let SAVE_FAILED = false;
+// Per-entity LWW union of another full DATA snapshot into memory. Used to reconcile
+// with what's already on disk before every write (so a second tab on the SAME ledger
+// can't blind-overwrite this tab's unsynced edits) and to adopt another tab's write
+// live via the 'storage' event. Purely local — does not touch SYNC flags.
+function reconcileSnapshot(snap){
+  if (!snap || typeof snap !== 'object') return false;
+  let changed = false;
+  for (const mapName of SYNC_MAPS){
+    const l = DATA[mapName] || (DATA[mapName] = {});
+    const r = snap[mapName] || {};
+    for (const id in r){
+      if (!l[id] || isNewer(r[id].updatedAt, l[id].updatedAt)){
+        if (l[id]){ for (const k in l[id]) delete l[id][k]; Object.assign(l[id], r[id]); }
+        else l[id] = r[id];
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
 const saveData = debounce(() => {
-  try { localStorage.setItem(LSKEY, JSON.stringify(DATA)); SAVE_FAILED = false; }
+  try {
+    const onDisk = localStorage.getItem(LSKEY);
+    if (onDisk){ try { reconcileSnapshot(JSON.parse(onDisk)); } catch (_) {} }
+    localStorage.setItem(LSKEY, JSON.stringify(DATA)); SAVE_FAILED = false;
+  }
   catch (e) { if (!SAVE_FAILED){ SAVE_FAILED = true; try { toast('⚠️ Could not save to this device — storage may be full. Turn on Sync or export a backup so edits aren’t lost.'); } catch (_) {} } }
 }, 250);
 const saveNow = () => saveData.now();
+// Another tab on this same ledger just wrote — adopt its entities live so this tab
+// stops holding stale state (which it would otherwise persist back over the newer one).
+window.addEventListener('storage', (e) => {
+  if (e.key !== LSKEY || !e.newValue) return;
+  try { if (reconcileSnapshot(JSON.parse(e.newValue))) renderCurrent(); } catch (_) {}
+});
+// Apply a pending app-version update. Never reload OVER unsaved state: a failed save
+// (storage full) would drop in-memory edits, and an open editor/import modal holds
+// state only in the DOM. Defer to the next natural launch, modal close, or hide.
+function doAutoReload(){
+  saveNow();
+  if (SAVE_FAILED || document.documentElement.classList.contains('modal-open')){ PENDING_RELOAD = true; return; }
+  window.location.reload();
+}
 
 // All mutations flow through put()/softDelete() so updatedAt + sync stay honest.
 function put(mapName, ent){
@@ -719,7 +761,7 @@ const BANK_PRESETS = [
     map: { date: 'posted date', desc: 'payee', amount: 'amount' } },
   { id: 'apple', label: 'Apple Card', sig: ['transaction date', 'merchant', 'amount (usd)'],
     map: { date: 'transaction date', desc: 'merchant', amount: 'amount (usd)', flip: true } },
-  { id: 'amex', label: 'Amex', sig: ['date', 'description', 'amount'],
+  { id: 'amex', label: 'Amex', sig: ['date', 'description', 'amount'], exact: true,
     map: { date: 'date', desc: 'description', amount: 'amount', flip: true } },
 ];
 
@@ -732,9 +774,28 @@ function detectPreset(headers){
   const h = headers.map((x) => x.trim().toLowerCase());
   let best = null, bestLen = 0;
   for (const p of BANK_PRESETS){
-    if (p.sig.every((col) => h.includes(col)) && p.sig.length > bestLen){ best = p; bestLen = p.sig.length; }
+    // `exact` presets (generic short signatures like Amex's date/description/amount)
+    // must match the header set EXACTLY — otherwise any other bank's superset export
+    // matches by subset and inherits Amex's flip, inverting every sign.
+    const ok = p.exact ? (p.sig.length === h.length && p.sig.every((col) => h.includes(col)))
+                       : p.sig.every((col) => h.includes(col));
+    if (ok && p.sig.length > bestLen){ best = p; bestLen = p.sig.length; }
   }
   return best;
+}
+// A flip:true preset assumes an all-positive purchase export. If the amounts are
+// already signed (a meaningful share negative), flipping would invert the statement,
+// so demote flip. Only ever demotes — never adds a flip a preset didn't ask for.
+function sanitizeFlip(mapping, dataRows){
+  if (!mapping.flip || mapping.amountIdx == null || mapping.amountIdx < 0) return mapping;
+  let neg = 0, nonzero = 0;
+  for (const row of dataRows){
+    const a = parseAmountCents(row[mapping.amountIdx]);
+    if (a == null || a === 0) continue;
+    nonzero++; if (a < 0) neg++;
+  }
+  if (nonzero >= 4 && neg / nonzero >= 0.25){ mapping.flip = false; mapping.flipDemoted = true; }
+  return mapping;
 }
 // Inspect raw CSV text -> everything the import UI needs to show a preview.
 function analyzeCSV(text, filename){
@@ -744,7 +805,8 @@ function analyzeCSV(text, filename){
   const headers = hasHeader ? rows[0].map((x) => x.trim()) : rows[0].map((_, i) => 'Column ' + (i + 1));
   const dataRows = hasHeader ? rows.slice(1) : rows;
   const preset = hasHeader ? detectPreset(headers) : null;
-  return { filename, headers, dataRows, hasHeader, preset, mapping: preset ? presetToMapping(preset, headers) : guessMapping(headers) };
+  const mapping = sanitizeFlip(preset ? presetToMapping(preset, headers) : guessMapping(headers), dataRows);
+  return { filename, headers, dataRows, hasHeader, preset, mapping };
 }
 // mapping: {dateIdx, descIdx, amountIdx | debitIdx+creditIdx, flip} (column indexes)
 function presetToMapping(preset, headers){
@@ -796,11 +858,16 @@ function applyMapping(dataRows, mapping){
 // the same statement must NOT resurrect it.
 function importParsed(acctId, parsed, sourceLabel){
   const batchId = uid();
+  // Count by fp base for EVERY txn, not just ones still in this account: the base
+  // embeds the import-time account, so counting stays account-scoped by construction,
+  // and a txn later moved to another account still dedupes against a re-import of its
+  // original statement (the acct-filtered version silently re-created it as a dupe).
   const fpCount = {};
   for (const id in DATA.txns){
     const t = DATA.txns[id];
-    if (t.acct !== acctId) continue;
-    fpCount[t.fp.split('|#')[0]] = (fpCount[t.fp.split('|#')[0]] || 0) + 1;
+    if (!t.fp) continue;
+    const b = t.fp.split('|#')[0];
+    fpCount[b] = (fpCount[b] || 0) + 1;
   }
   const groups = {};
   for (const p of parsed){
@@ -1249,21 +1316,29 @@ function importRulesJSON(text, retro){
 /* ============================ CRYPTO (E2E) ============================ */
 // passphrase -> PBKDF2 -> [authToken (sent to worker) | AES-256-GCM key (never sent)].
 // roomId derives from authToken. The worker only ever sees ciphertext + counts.
-const KDF_ITER = 310000;
+// KDF is VERSIONED: 'v2' (600k iterations, meets the OWASP-2023 floor) is used for
+// every NEW room; 'v1' (the original 310k) is kept ONLY so already-established rooms
+// keep opening — the iteration count is baked into the token/roomId, so a room can't
+// change it without re-homing. currentKdfV() picks the right one: an install that is
+// already synced but predates versioning has no flag and is therefore 'v1'.
+const KDF_ITERS = { v1: 310000, v2: 600000 };
+const KDFVKEY = WS === 'personal' ? 'nest.p.kdfv' : 'nest.kdfv';
+function currentKdfV(){ return localStorage.getItem(KDFVKEY) || (localStorage.getItem(PASSKEY) ? 'v1' : 'v2'); }
 let CRYPTO = null;
-async function deriveKeys(pass){
+async function deriveKeys(pass, ver){
+  ver = ver || currentKdfV();
   const te = new TextEncoder();
   const km = await crypto.subtle.importKey('raw', te.encode(pass), 'PBKDF2', false, ['deriveBits']);
   // The personal workspace mixes a domain tag into the KDF, so even the IDENTICAL
   // passphrase derives a different key, token and room than the shared ledger — the
   // two rooms can never collide/merge by construction, not just by the UI guard.
-  // 'main' keeps the legacy byte-exact derivation so existing household rooms work.
-  const dom = WS === 'personal' ? '|personal' : '';
+  // 'main' + v1 keeps the original byte-exact derivation so existing rooms still work.
+  const dom = (WS === 'personal' ? '|personal' : '') + (ver === 'v2' ? '|v2' : '');
   const bits = new Uint8Array(await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt: te.encode('nest-ledger-v1|salt' + dom), iterations: KDF_ITER, hash: 'SHA-256' }, km, 512));
+    { name: 'PBKDF2', salt: te.encode('nest-ledger-v1|salt' + dom), iterations: KDF_ITERS[ver] || KDF_ITERS.v1, hash: 'SHA-256' }, km, 512));
   const authToken = hex(bits.slice(0, 32));
   const aesKey = await crypto.subtle.importKey('raw', bits.slice(32, 64), 'AES-GCM', false, ['encrypt', 'decrypt']);
-  const roomBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode('nest-room|' + (WS === 'personal' ? 'p|' : '') + authToken)));
+  const roomBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode('nest-room|' + (WS === 'personal' ? 'p|' : '') + (ver === 'v2' ? 'v2|' : '') + authToken)));
   return { authToken, aesKey, roomId: hex(roomBytes).slice(0, 24) };
 }
 async function maybeGzip(bytes){
@@ -1293,7 +1368,7 @@ async function decryptEnvelope(env){
 // Single encrypted blob + compare-and-swap version. Client pulls, merges
 // entity-by-entity (last-write-wins on updatedAt, tombstones included), then
 // pushes; a 409 means someone else pushed first -> re-pull, re-merge, retry once.
-const SYNC = { status: 'local', dirty: false, inflight: false,
+const SYNC = { status: 'local', dirty: false, inflight: false, lastWriteId: null,
                serverVer: +(localStorage.getItem(VERKEY) || 0) };
 function setSync(status){
   SYNC.status = status;
@@ -1312,12 +1387,54 @@ function mergeRemote(remote){
     const l = DATA[mapName] || (DATA[mapName] = {});
     const r = (remote && remote[mapName]) || {};
     for (const id in r){
-      if (!l[id] || isNewer(r[id].updatedAt, l[id].updatedAt)){ l[id] = r[id]; changed = true; }
-      else if (isNewer(l[id].updatedAt, r[id].updatedAt)) localAhead = true;
+      if (isNewer(r[id].updatedAt, (l[id] || {}).updatedAt)){
+        // Merge INTO the existing object (don't swap the reference), so an open
+        // editor holding DATA.txns[id] stays attached to the live entity — a tap
+        // after a background merge then edits the merged state, not a stale copy.
+        if (l[id]){ for (const k in l[id]) delete l[id][k]; Object.assign(l[id], r[id]); }
+        else l[id] = r[id];
+        changed = true;
+      } else if (isNewer((l[id] || {}).updatedAt, r[id].updatedAt)) localAhead = true;
     }
     for (const id in l) if (!(id in r)) localAhead = true;
   }
+  if (dedupeTxnsByFp()) changed = true;
   if (localAhead) SYNC.dirty = true;
+  return changed;
+}
+// Two devices importing the same statement before they sync produce identical
+// fingerprints under different ids; a strict-by-id merge keeps both, permanently
+// doubling the statement. Collapse any live txns that share an EXACT fp (which
+// already carries a '|#n' occurrence suffix, so two legit same-day identical
+// charges never collide, and manual txns use a unique 'manual|<uid>' fp). Both
+// devices keep the lexicographically-smallest id, so they converge with no ping-pong.
+function dedupeTxnsByFp(){
+  const byFp = {};
+  for (const id in DATA.txns){
+    const t = DATA.txns[id];
+    if (t.deleted || !t.fp) continue;
+    (byFp[t.fp] = byFp[t.fp] || []).push(id);
+  }
+  let changed = false;
+  for (const fp in byFp){
+    const ids = byFp[fp];
+    if (ids.length < 2) continue;
+    ids.sort();
+    const winner = DATA.txns[ids[0]];
+    for (let i = 1; i < ids.length; i++){
+      const loser = DATA.txns[ids[i]];
+      // Carry any human edit from a losing copy onto an untouched winner so a
+      // categorization made on the duplicate isn't lost with it.
+      if ((!winner.cat && loser.cat) || (winner.status === 'review' && loser.status === 'ok')){
+        winner.cat = winner.cat || loser.cat; winner.status = loser.status;
+        if (loser.splits && !winner.splits) winner.splits = loser.splits;
+        winner.updatedAt = nowISO();
+      }
+      loser.deleted = true; loser.updatedAt = nowISO();
+      changed = true;
+    }
+  }
+  if (changed){ SYNC.dirty = true; saveData(); }
   return changed;
 }
 async function syncPull(quiet){
@@ -1328,8 +1445,14 @@ async function syncPull(quiet){
     if (res.status === 401){ setSync('locked'); return false; }
     if (!res.ok) throw 0;
     const body = await res.json();
+    const prevVer = SYNC.serverVer, prevWrite = SYNC.lastWriteId;
     SYNC.serverVer = body.ver || 0;
     localStorage.setItem(VERKEY, SYNC.serverVer);
+    // Clobber detection: KV's edge cache lets two pushes land on the same ver, so our
+    // "accepted" write can be silently overwritten. If the server still reports the ver
+    // we last owned but a DIFFERENT writeId, our push lost the race — re-push it.
+    if (body.writeId && prevWrite && body.ver === prevVer && body.writeId !== prevWrite) SYNC.dirty = true;
+    if (body.writeId) SYNC.lastWriteId = body.writeId;
     let changed = false;
     if (body.env){
       const remote = await decryptEnvelope(body.env); // throws on corrupt/wrong key
@@ -1364,8 +1487,11 @@ async function syncPush(){
       if (!res.ok) throw 0;
       const body = await res.json();
       SYNC.serverVer = body.ver;
+      SYNC.lastWriteId = body.writeId || null;
       localStorage.setItem(VERKEY, body.ver);
-      setSync('synced');
+      // A mutation that landed DURING this push was dropped by the inflight guard —
+      // re-arm instead of reporting 'synced' over an unsent edit.
+      if (SYNC.dirty){ setSync('syncing'); schedulePush(); } else setSync('synced');
       return;
     }
     SYNC.dirty = true; setSync('offline');
@@ -1377,17 +1503,55 @@ async function syncPush(){
 }
 const schedulePush = debounce(() => { syncPush(); }, 2500);
 async function enableSync(pass){
+  // Prefer the strong v2 derivation for a NEW room, but if this passphrase already
+  // has a v1 room (synced before versioning shipped) and no v2 room yet, adopt v1 so
+  // the user isn't stranded from data they already have server-side.
+  let ver = 'v2';
+  try {
+    const v2 = await deriveKeys(pass, 'v2');
+    const b2 = await (await fetch(SYNC_URL + '/state/' + v2.roomId, { headers: { 'X-Nest-Auth': v2.authToken } })).json();
+    if (!(b2 && b2.env)){
+      const v1 = await deriveKeys(pass, 'v1');
+      const b1 = await (await fetch(SYNC_URL + '/state/' + v1.roomId, { headers: { 'X-Nest-Auth': v1.authToken } })).json();
+      if (b1 && b1.env) ver = 'v1';
+    }
+  } catch (e) { /* offline — default to v2 */ }
   localStorage.setItem(PASSKEY, pass);
-  CRYPTO = await deriveKeys(pass);
+  localStorage.setItem(KDFVKEY, ver);
+  CRYPTO = await deriveKeys(pass, ver);
   if (countEntities(DATA) > 0) SYNC.dirty = true;
   try { await syncPull(); } catch (e) {}
   if (SYNC.dirty) await syncPush();
 }
 function disableSync(){
   localStorage.removeItem(PASSKEY);
+  localStorage.removeItem(KDFVKEY); // re-probe KDF version on next enable
   CRYPTO = null;
   SYNC.dirty = false;
+  SYNC.lastWriteId = null;
   setSync('local');
+}
+// Auth-gated erase of the room on the server (state + lock + backups). Used by the
+// "erase server copy" disconnect and as the first half of passphrase rotation, so a
+// leaked passphrase can't keep decrypting the old blob + backup ring forever.
+async function eraseServerCopy(){
+  if (!CRYPTO) return false;
+  try {
+    const res = await fetch(SYNC_URL + '/state/' + CRYPTO.roomId, { method: 'DELETE', headers: { 'X-Nest-Auth': CRYPTO.authToken } });
+    return res.ok;
+  } catch (e) { return false; }
+}
+// Minimum passphrase strength for a NEW room. No iteration count saves a guessable
+// passphrase against an offline attack on a leaked blob, so this is the real control:
+// require either 4+ words or 16+ chars, and reject the common word+digits shape.
+function passphraseWeakness(p){
+  p = String(p || '');
+  const words = p.trim().split(/\s+/).filter(Boolean);
+  if (words.length >= 4) return null;
+  if (p.length >= 16) return null;
+  if (p.length < 12) return 'Use at least 12 characters (4 random words is easiest to remember).';
+  if (/^[A-Za-z]+\d{1,4}$/.test(p)) return 'A word followed by numbers is easy to guess — use 4 random words instead.';
+  return null;
 }
 
 /* ============================ BACKUP ============================ */
@@ -1400,7 +1564,7 @@ function exportBackup(){
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
-function importBackup(text, mode){
+async function importBackup(text, mode){
   let obj;
   try { obj = JSON.parse(text); } catch (e) { return { error: 'Not valid JSON' }; }
   const data = obj && obj.app === 'nest' ? obj.data : obj;
@@ -1411,7 +1575,27 @@ function importBackup(text, mode){
   if (obj && obj.app === 'nest' && obj.ws && obj.ws !== WS)
     return { error: 'That’s a ' + (obj.ws === 'personal' ? '🔒 Personal' : '🏠 Shared') + '-ledger backup — nothing was imported. Switch ledgers (tap the chip up top), then import it there.' };
   if (mode === 'replace'){
-    DATA = data;
+    // A plain swap loses to sync: the next push pulls first, and the room's copies
+    // (newer updatedAt) overwrite the restore — so Replace silently became Merge.
+    // Make the restore authoritative under last-write-wins: pull the full current
+    // room state first, then stamp every restored entity 'now' so it out-ranks the
+    // room's copies, and tombstone anything present now but absent from the backup
+    // so post-backup entities can't be re-adopted. The restore then propagates to
+    // every device instead of being undone.
+    if (CRYPTO){ try { await syncPull(true); } catch (e) {} }
+    const ts = nowISO();
+    const prev = {};
+    for (const m of SYNC_MAPS) prev[m] = DATA[m] || {};
+    const next = {};
+    for (const m of SYNC_MAPS){
+      next[m] = {};
+      const src = data[m] || {};
+      for (const id in src){ const e = Object.assign({}, src[id]); e.updatedAt = ts; next[m][id] = e; }
+      // tombstone entities that existed (locally or in the room) but aren't in the backup
+      for (const id in prev[m]) if (!next[m][id]) next[m][id] = Object.assign({}, prev[m][id], { deleted: true, updatedAt: ts });
+    }
+    for (const k in data) if (!SYNC_MAPS.includes(k)) next[k] = data[k];
+    DATA = next;
     for (const m of SYNC_MAPS) DATA[m] = DATA[m] || {};
   } else {
     mergeRemote(data);
@@ -1445,7 +1629,10 @@ function modal(title, html, onClose){
   document.documentElement.classList.add('modal-open'); // freeze the page behind the popup
   let closed = false;
   function close(){ if (closed) return; closed = true; overlay.remove();
-    if (!root.querySelector('.overlay')) document.documentElement.classList.remove('modal-open'); // last one out unlocks
+    if (!root.querySelector('.overlay')){
+      document.documentElement.classList.remove('modal-open'); // last one out unlocks
+      if (PENDING_RELOAD && !SAVE_FAILED){ saveNow(); window.location.reload(); } // apply the update deferred while a modal was open
+    }
     if (onClose) onClose(); }
   return { node: sheet, close };
 }
@@ -1548,14 +1735,23 @@ function liveAccounts(){ return Object.values(DATA.accounts).filter((a) => !a.de
 // account since the anchor date (transfers and excluded txns included — they all
 // moved money). Returns null when no anchor has been set.
 function accountBalance(acct){ return accountBalanceAt(acct, '9999-12-31'); }
-// Balance as of the end of `asOf` (inclusive): anchor + every txn in (anchorDate, asOf].
+// Balance as of the end of `asOf` (inclusive). Forward from the anchor: add every
+// txn in (anchorDate, asOf]. For a date BEFORE the anchor, walk backward instead —
+// subtract every recorded txn in (asOf, anchorDate] — so an earlier month reflects
+// its real recorded activity rather than flat-carrying the anchor balance backward
+// (which inverted the net-worth trend for later-anchored accounts). With no recorded
+// pre-anchor txns this degrades to the anchor balance, unchanged from before.
 function accountBalanceAt(acct, asOf){
   if (!acct || acct.anchorBal == null || !acct.anchorDate) return null;
   let bal = acct.anchorBal;
   for (const id in DATA.txns){
     const t = DATA.txns[id];
     if (t.deleted || t.acct !== acct.id) continue;
-    if (t.date > acct.anchorDate && t.date <= asOf) bal += t.amt;
+    if (asOf >= acct.anchorDate){
+      if (t.date > acct.anchorDate && t.date <= asOf) bal += t.amt;
+    } else if (t.date > asOf && t.date <= acct.anchorDate){
+      bal -= t.amt;
+    }
   }
   return bal;
 }
@@ -1693,15 +1889,18 @@ async function refreshBtcPrice(force){
 }
 // Holdings + cost basis for a Bitcoin account, from its transactions (t.btc = sats).
 function btcStats(acctId){
-  let sats = 0, invested = 0;
+  let sats = 0, invested = 0, buySats = 0, buyCash = 0;
   for (const id in DATA.txns){
     const t = DATA.txns[id];
     if (t.deleted || t.acct !== acctId) continue;
     if (t.btc) sats += t.btc;
-    invested += t.amt; // net cash put in
+    invested += t.amt; // net cash put in (buys minus sale proceeds)
+    if (t.btc > 0){ buySats += t.btc; buyCash += t.amt; } // acquisitions only
   }
   const btc = sats / 1e8;
-  const avgCost = sats > 0 ? Math.round(invested / btc) : 0; // cents per whole BTC
+  // Avg BUY price = cash spent acquiring ÷ BTC acquired. Using net `invested` here
+  // went negative/absurd after a profitable partial sell (proceeds aren't a cost).
+  const avgCost = buySats > 0 ? Math.round(buyCash / (buySats / 1e8)) : 0; // cents per whole BTC
   const value = (BTC_PRICE && sats > 0) ? Math.round(btc * BTC_PRICE.usd) : null;
   return { sats, btc, invested, avgCost, value, price: BTC_PRICE ? BTC_PRICE.usd : null };
 }
@@ -1730,13 +1929,18 @@ function btcSeries(acctId, year){
   // Real range: first buy → today; scoped to a year that's the year's slice (holdings
   // carry in from prior years).
   const months = []; for (let y = firstYM; y <= curYM; y = shiftYM(y, 1)){ months.push(y); if (months.length > 600) break; }
-  let sats = 0, invested = 0, ti = 0;
+  let sats = 0, invested = 0, buySats = 0, buyCash = 0, ti = 0;
   const pts = months.map((ym) => {
     const cutoff = ym + '-31';
-    while (ti < txns.length && txns[ti].date <= cutoff){ sats += txns[ti].btc || 0; invested += txns[ti].amt || 0; ti++; }
+    while (ti < txns.length && txns[ti].date <= cutoff){
+      const tt = txns[ti];
+      sats += tt.btc || 0; invested += tt.amt || 0;
+      if (tt.btc > 0){ buySats += tt.btc; buyCash += tt.amt || 0; }
+      ti++;
+    }
     const price = priceAt(dnum(cutoff));
     const value = price != null && sats > 0 ? Math.round((sats / 1e8) * price) : (sats > 0 ? null : 0);
-    return { ym, sats, btc: sats / 1e8, invested, price, value };
+    return { ym, sats, btc: sats / 1e8, invested, buySats, buyCash, price, value };
   });
   return { pts: (year && year !== 'all') ? pts.filter((p) => p.ym.slice(0, 4) === year) : pts };
 }
@@ -2286,8 +2490,12 @@ function renderHome(){
     return;
   }
   // Home account filter: only CHECKED accounts feed the charts/data below.
-  for (const id of [...HOME_OFF]) if (!DATA.accounts[id] || DATA.accounts[id].deleted) HOME_OFF.delete(id);
-  const acctFilter = HOME_OFF.size ? new Set(liveAccounts().filter((a) => !HOME_OFF.has(a.id)).map((a) => a.id)) : null;
+  // Release ids that are gone OR archived — an archived, still-unchecked id has no
+  // visible checkbox to re-check, so it would strand an invisible, unclearable filter.
+  for (const id of [...HOME_OFF]) if (!DATA.accounts[id] || DATA.accounts[id].deleted || DATA.accounts[id].archived) HOME_OFF.delete(id);
+  // Whitelist from ALL non-deleted accounts (not just live ones) so unchecking one
+  // account doesn't also silently drop every archived account's history from the charts.
+  const acctFilter = HOME_OFF.size ? new Set(Object.values(DATA.accounts).filter((a) => !a.deleted && !HOME_OFF.has(a.id)).map((a) => a.id)) : null;
   const agg = buildMonthAgg(acctFilter);
   // Year lens: 'all' (Overall) is the default; arrows/dropdown step through it + each year.
   // Options are the GLOBAL year set so the shared lens is always valid across views.
@@ -2298,7 +2506,19 @@ function renderHome(){
   const st = yearStats(agg, YEAR_LENS);
   const baseline = baselineByCat(agg);
 
-  let html = '<div class="month-nav"><button data-x="prev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button>' +
+  // Durability nudge: this device holds the ONLY copy when it's a non-installed
+  // browser tab with sync off — and Safari deletes tab storage after 7 days without a
+  // visit. Warn once (dismissible) with the two real fixes: install, or turn on Sync.
+  const installed = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone;
+  const atRisk = !installed && !localStorage.getItem(PASSKEY) && !localStorage.getItem('nest.nudge.' + WS);
+  const nudge = atRisk
+    ? '<div class="card" style="border-color:var(--status-crit)"><h3 style="margin-top:0">⚠️ This is the only copy</h3>' +
+      '<p class="muted" style="margin:0 0 10px">You’re in a browser tab with Sync off, so this ledger lives only on this device — and Safari can delete browser-tab data after about a week without a visit. Protect it:</p>' +
+      '<div class="row"><button class="btn btn-primary grow" data-x="nudge-sync">Turn on Sync</button>' +
+      '<button class="btn grow" data-x="nudge-export">Export backup</button></div>' +
+      '<button class="btn btn-sm btn-block" data-x="nudge-dismiss" style="margin-top:8px">Dismiss</button></div>'
+    : '';
+  let html = nudge + '<div class="month-nav"><button data-x="prev"' + (yi <= 0 ? ' disabled' : '') + '>‹</button>' +
     '<select data-x="ysel" class="ynav-sel">' + yearSeq.map((y) => '<option value="' + y + '"' + (y === YEAR_LENS ? ' selected' : '') + '>' + esc(yearLabel(y)) + '</option>').join('') + '</select>' +
     '<button data-x="next"' + (yi >= yearSeq.length - 1 ? ' disabled' : '') + '>›</button></div>';
 
@@ -2412,6 +2632,9 @@ function renderHome(){
   c.querySelector('[data-x=ysel]').onchange = (e) => { YEAR_LENS = e.target.value; renderHome(); };
   const on = (sel, fn) => { const n2 = c.querySelector(sel); if (n2) n2.onclick = fn; };
   on('[data-x=import]', () => openScreen('Import', renderImportScreen));
+  on('[data-x=nudge-sync]', () => openScreen('Sync', renderSyncScreen));
+  on('[data-x=nudge-export]', () => exportBackup());
+  on('[data-x=nudge-dismiss]', () => { localStorage.setItem('nest.nudge.' + WS, '1'); renderHome(); });
   on('[data-x=bal]', () => openScreen('Accounts', renderAccountsScreen));
   c.querySelectorAll('[data-aidhome]').forEach((n2) => { n2.onclick = () => openAccountModal(n2.dataset.aidhome); });
   c.querySelectorAll('[data-aichk]').forEach((n2) => { n2.onclick = (e) => {
@@ -2835,7 +3058,7 @@ function renderAccountModal(c, acctId, close){
     let b;
     if (!scoped){ b = btcStats(acctId); }
     else { const kp = bs.pts.filter((p) => p.sats != null); const lp = kp[kp.length - 1];
-      if (lp){ const btc = lp.sats / 1e8; b = { sats: lp.sats, btc, invested: lp.invested, value: lp.value, price: lp.price, avgCost: btc > 0 ? Math.round(lp.invested / btc) : 0 }; }
+      if (lp){ const btc = lp.sats / 1e8; b = { sats: lp.sats, btc, invested: lp.invested, value: lp.value, price: lp.price, avgCost: lp.buySats > 0 ? Math.round(lp.buyCash / (lp.buySats / 1e8)) : 0 }; }
       else { b = { sats: 0, btc: 0, invested: 0, value: 0, price: (BTC_PRICE ? BTC_PRICE.usd : null), avgCost: 0 }; } }
     const gain = b.value != null ? b.value - b.invested : null;
     const gainPct = (gain != null && b.invested > 0) ? Math.round(1000 * gain / b.invested) / 10 : null;
@@ -3084,7 +3307,8 @@ function renderVerifyMode(c){
       '</div>';
   }
   const scope = (REVIEW.month ? fmtMonth(REVIEW.month) : 'all months') + (REVIEW.acct ? ' · ' + accountName(REVIEW.acct) : '');
-  head += '<p class="muted" style="margin:0 0 10px">' + done + ' of ' + pool.length + ' verified in ' + scope +
+  const scopeH = esc(scope); // account names are free-text (and arrive via sync/import) — escape at every innerHTML sink
+  head += '<p class="muted" style="margin:0 0 10px">' + done + ' of ' + pool.length + ' verified in ' + scopeH +
     (done ? ' · <a data-x="reset" style="cursor:pointer">reset</a>' : '') + '</p>';
 
   function bind(){
@@ -3101,11 +3325,11 @@ function renderVerifyMode(c){
   }
 
   if (!pool.length){
-    c.innerHTML = head + '<div class="empty">No transactions in ' + scope + '.</div>';
+    c.innerHTML = head + '<div class="empty">No transactions in ' + scopeH + '.</div>';
     bind(); return;
   }
   if (!queue.length){
-    c.innerHTML = head + '<div class="empty">✅ Every transaction in ' + scope + ' is verified.</div>';
+    c.innerHTML = head + '<div class="empty">✅ Every transaction in ' + scopeH + ' is verified.</div>';
     bind(); return;
   }
   const t = queue[0];
@@ -3145,7 +3369,7 @@ function renderVerifyMode(c){
         '<button class="btn btn-sm grow" data-x="excl">Exclude</button>' +
       '</div>' +
     '</div>' +
-    '<p class="muted" style="text-align:center">' + queue.length + ' left to verify in ' + scope + '</p>';
+    '<p class="muted" style="text-align:center">' + queue.length + ' left to verify in ' + scopeH + '</p>';
   bind();
   const q = (s) => c.querySelector(s);
   const verifyAdvance = () => { t.verified = nowISO(); put('txns', t); renderVerifyMode(c); updateReviewBadge(); };
@@ -3329,14 +3553,19 @@ function renderActivity(){
     on('[data-x=bcat]', async () => {
       const cat = await openCatPicker({ showSystem: true });
       if (!cat || cat === '__all' || cat === '__uncat') return;
+      // Every single-txn path confirms before discarding a split; the bulk path must
+      // too, or a multi-category split is silently flattened with no undo.
+      const nSplit = [...ACT.sel].filter((id) => { const t = DATA.txns[id]; return t && !t.deleted && t.splits && t.splits.length; }).length;
+      if (nSplit && !(await confirmDlg(nSplit + ' of these ' + (nSplit === 1 ? 'is a split' : 'are splits') + ' — replace ' + (nSplit === 1 ? 'it' : 'them') + ' with this one category?', 'Replace'))) return;
+      let n = 0;
       for (const id of ACT.sel){
         const t = DATA.txns[id];
         if (!t || t.deleted) continue;
         t.cat = cat; t.splits = null;
         if (t.status === 'review') t.status = 'ok';
-        put('txns', t);
+        put('txns', t); n++;
       }
-      toast(ACT.sel.size + ' categorized');
+      toast(n + ' categorized');
       ACT.sel.clear(); ACT.select = false; renderCurrent();
     });
     on('[data-x=bexc]', () => {
@@ -3812,16 +4041,21 @@ function recurringCatData(){
   for (const c of liveCats()){
     if ((c.kind || 'expense') !== 'expense') continue;
     if (catIsOneTime(c)) continue;
-    const calAmt = {}, calCnt = {}; let total = 0, firstYM = null, active = 0, mn = Infinity, mx = 0;
+    const calAmt = {}, calCnt = {}; let total = 0, refunds = 0, firstYM = null, active = 0, mn = Infinity, mx = 0;
     for (const ym of months){
       const v = agg[ym].spend[c.id] || 0;
-      if (v <= 0) continue;
+      // A net-negative month is a refund, not a billing month — net its value out of
+      // the total but keep it out of the cadence/calendar profile (dropping it entirely
+      // overstated the annualized figure by the full pre-refund charge).
+      if (v <= 0){ if (v < 0) refunds += -v; continue; }
       total += v; active++; if (!firstYM) firstYM = ym; if (v < mn) mn = v; if (v > mx) mx = v;
       const cm = +ym.slice(5, 7); calAmt[cm] = (calAmt[cm] || 0) + v; calCnt[cm] = (calCnt[cm] || 0) + 1;
     }
-    if (total <= 0) continue; // no activity history → not shown
+    total = Math.max(0, total - refunds);
+    if (total <= 0) continue; // no net activity history → not shown
     let observedTotal = 0; const activeCal = [];
     for (let cm = 1; cm <= 12; cm++){ if (calCnt[cm]){ calAmt[cm] = Math.round(calAmt[cm] / calCnt[cm]); observedTotal += calAmt[cm]; activeCal.push(cm); } }
+    observedTotal = Math.max(0, observedTotal - refunds);
     // Denominator = the category's OWN span (first time it appeared → the latest month
     // of data), NOT the whole window. So a mortgage present every month reads at its
     // real amount; only genuine gaps in a category's own life dilute it.
@@ -4388,7 +4622,8 @@ function renderClaudeScreen(c){
     '<p class="muted" style="margin:0 0 10px">' + (merchants ? '<b style="color:var(--text)">' + merchants + '</b> merchants are waiting in review.' : 'Review queue is empty.') +
     ' Paste a digest into any Claude chat; the <b>audit</b> digest includes everything already categorized so mistakes can be caught too.</p>' +
     '<button class="btn btn-primary btn-block" data-x="copy"' + (merchants ? '' : ' disabled') + ' style="margin-bottom:8px">📋 Copy review digest</button>' +
-    '<button class="btn btn-block" data-x="copyall">🔍 Copy full audit digest (everything)</button></div>' +
+    '<button class="btn btn-block" data-x="copyall">🔍 Copy full audit digest (everything)</button>' +
+    '<p class="tiny" style="margin:8px 0 0">Heads up: a digest contains merchant names and dollar totals. Pasting it sends that to whatever chat you paste into — the audit digest covers your whole spending history.</p></div>' +
     '<div class="card"><h3>2 · Paste Claude’s rules back</h3>' +
     '<textarea data-x="paste" rows="5" placeholder=\'[{"pattern":"HOME DEPOT","cat":"hou-maint"}]\'></textarea>' +
     '<label class="row" style="margin-top:10px"><input type="checkbox" data-x="retro" style="width:auto"> ' +
@@ -4422,21 +4657,24 @@ function renderSyncScreen(c){
       : 'Use the <b>same passphrase on both phones</b> to share one ledger.') + '</p></div>';
   if (!CRYPTO){
     html += '<div class="card"><h3>Enable sync</h3>' +
-      '<label class="fld"><span>' + (WS === 'personal' ? 'Personal passphrase — yours alone, NOT the household one' : 'Shared passphrase') + ' — min 8 chars, try 4 random words</span><input type="password" data-x="p1" autocomplete="off"></label>' +
+      '<label class="fld"><span>' + (WS === 'personal' ? 'Personal passphrase — yours alone, NOT the household one' : 'Shared passphrase') + ' — 4 random words (or 16+ chars)</span><input type="password" data-x="p1" autocomplete="off"></label>' +
       '<label class="fld"><span>Repeat it</span><input type="password" data-x="p2" autocomplete="off"></label>' +
       '<button class="btn btn-primary btn-block" data-x="en">Enable sync</button>' +
       '<p class="tiny" style="margin:8px 0 0">Write it down — there is no reset. A lost passphrase = a new empty sync room.</p></div>';
   } else {
     html += '<div class="row" style="margin-bottom:10px"><button class="btn grow" data-x="now">Sync now</button>' +
-      '<button class="btn btn-danger grow" data-x="off">Disconnect</button></div>' +
-      '<p class="tiny">Disconnecting keeps everything on this device; it just stops syncing.</p>';
+      '<button class="btn grow" data-x="off">Disconnect</button></div>' +
+      '<p class="tiny" style="margin:0 0 12px">Disconnecting keeps everything on this device; it just stops syncing. The encrypted copy (and its backup snapshots) stay on the server so your other phone keeps working.</p>' +
+      '<button class="btn btn-danger btn-block" data-x="erase">Disconnect &amp; erase server copy</button>' +
+      '<p class="tiny" style="margin:8px 0 0">Erase deletes the encrypted blob + all backups from the server — do this if the passphrase may be compromised, then re-enable with a new one. Local data is untouched.</p>';
   }
   c.innerHTML = html;
   const q = (s2) => c.querySelector(s2);
   if (!CRYPTO){
     q('[data-x=en]').onclick = async () => {
       const p1 = q('[data-x=p1]').value, p2 = q('[data-x=p2]').value;
-      if (p1.length < 8){ toast('Passphrase must be at least 8 characters'); return; }
+      const weak = passphraseWeakness(p1);
+      if (weak){ toast(weak); return; }
       if (p1 !== p2){ toast('Passphrases don’t match'); return; }
       // Same passphrase = same sync room: the two ledgers would merge into one blob.
       const other = localStorage.getItem(WS === 'personal' ? 'nest.pass' : 'nest.p.pass');
@@ -4462,8 +4700,14 @@ function renderSyncScreen(c){
       toast(SYNC.status === 'synced' ? 'Synced ✓' : 'Sync ' + SYNC.status);
     };
     q('[data-x=off]').onclick = async () => {
-      if (!(await confirmDlg('Turn off sync on this device? Local data stays.', 'Disconnect'))) return;
+      if (!(await confirmDlg('Turn off sync on this device? Local data stays, and the server copy is kept so your other phone still works.', 'Disconnect'))) return;
       disableSync(); renderMore(); toast('Sync off');
+    };
+    q('[data-x=erase]').onclick = async () => {
+      if (!(await confirmDlg('Erase the encrypted copy and ALL backups from the server? Every synced device stops receiving updates and your other phone must re-enable sync. Local data on this device is untouched.', 'Erase'))) return;
+      const ok = await eraseServerCopy();
+      disableSync(); renderMore();
+      toast(ok ? 'Server copy erased' : 'Disconnected, but couldn’t reach the server to erase — try again when online');
     };
   }
 }
@@ -4489,7 +4733,7 @@ function renderBackupScreen(c){
   fi.onchange = async () => {
     const f = fi.files && fi.files[0];
     if (!f) return;
-    const r = importBackup(await f.text(), mode);
+    const r = await importBackup(await f.text(), mode);
     if (r.error){ toast(r.error); return; }
     toast('Backup ' + (mode === 'replace' ? 'restored' : 'merged') + ' — ' + r.entities + ' entities');
     renderCurrent();
@@ -4501,6 +4745,11 @@ loadData();
 bindNav();
 showTab('home');
 setSync('local');
+// Ask the browser to keep this origin's storage durable — guards the ledger against
+// storage-pressure eviction on Chrome and Safari 15.2+ (installed PWAs included).
+// Harmless where unsupported. (It does NOT exempt a non-installed Safari TAB from the
+// 7-day ITP wipe — the at-risk banner below covers that case.)
+if (navigator.storage && navigator.storage.persist){ try { navigator.storage.persist(); } catch (e) {} }
 if ('serviceWorker' in navigator){
   // Auto-refresh once when a new app version takes over, so shipped updates
   // actually land on installed PWAs without a manual force-close.
@@ -4509,8 +4758,7 @@ if ('serviceWorker' in navigator){
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController || refreshed) return;
     refreshed = true;
-    saveNow();
-    window.location.reload();
+    doAutoReload();
   });
   window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch(() => {}); });
   // Resident PWAs never re-navigate on foreground; check for a new sw.js there too.
@@ -4534,8 +4782,10 @@ if ('serviceWorker' in navigator){
   }
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden){ saveNow(); }
-  else if (CRYPTO){ SYNC.dirty ? syncPush() : syncPull().catch(() => {}); }
+  if (document.hidden){ saveNow(); if (PENDING_RELOAD && !SAVE_FAILED) window.location.reload(); }
+  // On foreground, a clean pull that discovers we're ahead (localAhead) must also push,
+  // or the edit sits local-only until the next mutation while the chip says 'synced'.
+  else if (CRYPTO){ SYNC.dirty ? syncPush() : syncPull().then(() => { if (SYNC.dirty) syncPush(); }).catch(() => {}); }
 });
 window.addEventListener('beforeunload', saveNow);
 </script>

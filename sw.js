@@ -1,13 +1,15 @@
 // Nest service worker — cache-first for same-origin assets, network-first for
 // navigation (falling back to cache offline). Never caches the sync worker origin.
-const CACHE_NAME = 'nest-v76';
+const CACHE_NAME = 'nest-v77';
 const PRECACHE = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 const SYNC_ORIGIN = 'workers.dev';
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(PRECACHE))
+      // cache:'reload' bypasses the HTTP cache so a new SW can never precache the
+      // PREVIOUS build's index.html served from the browser's own cache.
+      .then((cache) => cache.addAll(PRECACHE.map((u) => new Request(u, { cache: 'reload' }))))
       .then(() => self.skipWaiting())
   );
 });
@@ -39,8 +41,12 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       fetch(req)
         .then((res) => {
-          const copy = res.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+          // Only cache GOOD shells: a transient 404/503 (mid-deploy Pages window)
+          // must never overwrite the offline app shell.
+          if (res && res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+          }
           return res;
         })
         .catch(() => caches.match(req).then((cached) => cached || caches.match('./index.html')))
