@@ -321,7 +321,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v8.2'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v8.3'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 // ---- Workspaces: 'main' = the shared household ledger (legacy keys, syncs with the
 // shared passphrase) and 'personal' = a fully separate ledger with its OWN storage and
@@ -588,7 +588,7 @@ function subsInGroup(groupId){
 }
 // Subcategories carry their own icon (kv.subMeta, keyed group|sub).
 function subMetaMap(){ return (DATA.kv.subMeta && DATA.kv.subMeta.map) || {}; }
-function subIcon(groupId, sub){ const m = subMetaMap()[groupId + '|' + sub]; return (m && m.icon) || '📁'; }
+function subIcon(groupId, sub){ const m = subMetaMap()[groupId + '|' + sub]; return esc((m && m.icon) || '📁'); } // user text → escaped at source
 function setSubMeta(groupId, sub, patch){
   const ent = DATA.kv.subMeta || { id: 'subMeta', map: {} };
   ent.map = Object.assign({}, ent.map);
@@ -617,6 +617,7 @@ function reconcileSnapshot(snap){
     const r = snap[mapName] || {};
     for (const id in r){
       if (!l[id] || isNewer(r[id].updatedAt, l[id].updatedAt)){
+        if (!r[id].id) r[id].id = id;
         if (l[id]){ for (const k in l[id]) delete l[id][k]; Object.assign(l[id], r[id]); }
         else l[id] = r[id];
         changed = true;
@@ -688,11 +689,15 @@ function purgeTombstones(){
   //  • cats/rules: seedIfEmpty() upserts seed rows by id, so a purged seed tombstone
   //    would silently reappear (and re-propagate over sync).
   const KEEP = new Set(['txns', 'cats', 'rules']);
+  let purged = 0;
   for (const m of SYNC_MAPS){
     if (KEEP.has(m)) continue;
     for (const id in DATA[m])
-      if (DATA[m][id].deleted && DATA[m][id].updatedAt < cutoff) delete DATA[m][id];
+      if (DATA[m][id].deleted && DATA[m][id].updatedAt < cutoff){ delete DATA[m][id]; purged++; }
   }
+  // Write RAW: the normal saveData reconciles with the on-disk snapshot first and
+  // would adopt the just-purged tombstones straight back, making the purge a no-op.
+  if (purged){ try { localStorage.setItem(LSKEY, JSON.stringify(DATA)); } catch (e) {} }
 }
 function settings(){
   return DATA.kv.settings || { id: 'settings', baselineFrom: '', baselineTo: '' };
@@ -862,10 +867,15 @@ function importParsed(acctId, parsed, sourceLabel){
   // embeds the import-time account, so counting stays account-scoped by construction,
   // and a txn later moved to another account still dedupes against a re-import of its
   // original statement (the acct-filtered version silently re-created it as a dupe).
-  const fpCount = {};
+  // Count DISTINCT occurrence slots: after a cross-device dedupe the losing copy is
+  // a tombstone sharing the winner's EXACT fp, and counting it too would inflate the
+  // slot count and silently skip a genuinely new identical charge on a later import.
+  // A lone tombstone still counts once, so a deleted charge never resurrects.
+  const fpCount = {}, seenFp = new Set();
   for (const id in DATA.txns){
     const t = DATA.txns[id];
-    if (!t.fp) continue;
+    if (!t.fp || seenFp.has(t.fp)) continue;
+    seenFp.add(t.fp);
     const b = t.fp.split('|#')[0];
     fpCount[b] = (fpCount[b] || 0) + 1;
   }
@@ -1391,6 +1401,7 @@ function mergeRemote(remote){
         // Merge INTO the existing object (don't swap the reference), so an open
         // editor holding DATA.txns[id] stays attached to the live entity — a tap
         // after a background merge then edits the merged state, not a stale copy.
+        if (!r[id].id) r[id].id = id;
         if (l[id]){ for (const k in l[id]) delete l[id][k]; Object.assign(l[id], r[id]); }
         else l[id] = r[id];
         changed = true;
@@ -1458,6 +1469,14 @@ async function syncPull(quiet){
       const remote = await decryptEnvelope(body.env); // throws on corrupt/wrong key
       changed = mergeRemote(remote);
       if (changed){ saveData(); renderCurrent(); }
+    } else if (prevVer > 0){
+      // We previously synced a NON-empty version of this room and it's now empty:
+      // it was ERASED from another device. Never re-create it — the whole point of
+      // erasing is that the ledger must not go back up under that passphrase.
+      disableSync();
+      toast('Sync was erased from your other device — re-enable Sync with the new passphrase.');
+      renderCurrent();
+      return false;
     } else if (countEntities(DATA) > 0){
       SYNC.dirty = true; // fresh room, we have data -> needs first push
     }
@@ -1475,6 +1494,7 @@ async function syncPush(){
   try {
     for (let attempt = 0; attempt < 2; attempt++){
       await syncPull(true);
+      if (!CRYPTO) return; // the pull found the room erased and disconnected — nothing to push
       SYNC.dirty = false;
       const env = await encryptState();
       const res = await fetch(SYNC_URL + '/state/' + CRYPTO.roomId, {
@@ -1506,26 +1526,33 @@ async function enableSync(pass){
   // Prefer the strong v2 derivation for a NEW room, but if this passphrase already
   // has a v1 room (synced before versioning shipped) and no v2 room yet, adopt v1 so
   // the user isn't stranded from data they already have server-side.
+  // The probe MUST succeed. Defaulting to v2 while offline would persist a possibly
+  // wrong version, strand the phone on an empty room, and report "Sync enabled" —
+  // so any network failure here throws and NOTHING is saved (caller toasts).
   let ver = 'v2';
-  try {
-    const v2 = await deriveKeys(pass, 'v2');
-    const b2 = await (await fetch(SYNC_URL + '/state/' + v2.roomId, { headers: { 'X-Nest-Auth': v2.authToken } })).json();
-    if (!(b2 && b2.env)){
-      const v1 = await deriveKeys(pass, 'v1');
-      const b1 = await (await fetch(SYNC_URL + '/state/' + v1.roomId, { headers: { 'X-Nest-Auth': v1.authToken } })).json();
-      if (b1 && b1.env) ver = 'v1';
-    }
-  } catch (e) { /* offline — default to v2 */ }
+  let keys = await deriveKeys(pass, 'v2');
+  const b2 = await (await fetch(SYNC_URL + '/state/' + keys.roomId, { headers: { 'X-Nest-Auth': keys.authToken } })).json();
+  if (!(b2 && b2.env)){
+    const v1 = await deriveKeys(pass, 'v1');
+    const b1 = await (await fetch(SYNC_URL + '/state/' + v1.roomId, { headers: { 'X-Nest-Auth': v1.authToken } })).json();
+    if (b1 && b1.env){ ver = 'v1'; keys = v1; }
+  }
   localStorage.setItem(PASSKEY, pass);
   localStorage.setItem(KDFVKEY, ver);
-  CRYPTO = await deriveKeys(pass, ver);
+  CRYPTO = keys;
   if (countEntities(DATA) > 0) SYNC.dirty = true;
   try { await syncPull(); } catch (e) {}
   if (SYNC.dirty) await syncPush();
 }
+const ERASEDKEY = WS === 'personal' ? 'nest.p.erased' : 'nest.erased'; // sha256 of a passphrase whose room was erased
+async function sha256hex(s){ return hex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(s || ''))))); }
 function disableSync(){
   localStorage.removeItem(PASSKEY);
   localStorage.removeItem(KDFVKEY); // re-probe KDF version on next enable
+  // Forget the room's version too: a re-enable must start clean, or the erase
+  // detection in syncPull would mistake the NEW room's ver 0 for an erased room.
+  localStorage.removeItem(VERKEY);
+  SYNC.serverVer = 0;
   CRYPTO = null;
   SYNC.dirty = false;
   SYNC.lastWriteId = null;
@@ -1538,7 +1565,7 @@ async function eraseServerCopy(){
   if (!CRYPTO) return false;
   try {
     const res = await fetch(SYNC_URL + '/state/' + CRYPTO.roomId, { method: 'DELETE', headers: { 'X-Nest-Auth': CRYPTO.authToken } });
-    return res.ok;
+    return res.ok || res.status === 404; // 404 = never claimed → nothing to erase
   } catch (e) { return false; }
 }
 // Minimum passphrase strength for a NEW room. No iteration count saves a guessable
@@ -1547,10 +1574,12 @@ async function eraseServerCopy(){
 function passphraseWeakness(p){
   p = String(p || '');
   const words = p.trim().split(/\s+/).filter(Boolean);
-  if (words.length >= 4) return null;
+  if (/^(.)\1+$/.test(p) || new Set(p).size < 5 || /^\d+$/.test(p)) return 'Too repetitive — use 4 random words.';
+  if (/qwerty|asdfgh|zxcvbn|12345|abcdef|password|letmein/i.test(p)) return 'That’s a common pattern — use 4 random words.';
+  if (words.length >= 4 && words.every((w) => w.length >= 3) && new Set(words.map((w) => w.toLowerCase())).size >= 4) return null;
   if (p.length >= 16) return null;
   if (p.length < 12) return 'Use at least 12 characters (4 random words is easiest to remember).';
-  if (/^[A-Za-z]+\d{1,4}$/.test(p)) return 'A word followed by numbers is easy to guess — use 4 random words instead.';
+  if (/^[A-Za-z]+\d{1,6}[^A-Za-z0-9]?$/.test(p)) return 'A word followed by numbers is easy to guess — use 4 random words instead.';
   return null;
 }
 
@@ -1631,7 +1660,9 @@ function modal(title, html, onClose){
   function close(){ if (closed) return; closed = true; overlay.remove();
     if (!root.querySelector('.overlay')){
       document.documentElement.classList.remove('modal-open'); // last one out unlocks
-      if (PENDING_RELOAD && !SAVE_FAILED){ saveNow(); window.location.reload(); } // apply the update deferred while a modal was open
+      // Apply an update deferred while a modal was open — but AFTER this close's
+      // resolve/onClose handlers run (a confirmed action may open the next sheet).
+      if (PENDING_RELOAD && !SAVE_FAILED) setTimeout(() => { if (PENDING_RELOAD && !SAVE_FAILED && !document.documentElement.classList.contains('modal-open')){ saveNow(); window.location.reload(); } }, 400);
     }
     if (onClose) onClose(); }
   return { node: sheet, close };
@@ -1648,7 +1679,7 @@ function confirmDlg(msg, okLabel){
 function catLabel(catId){
   if (catId === '__uncat' || !catId) return { icon: '❓', name: 'Uncategorized' };
   const c = DATA.cats[catId];
-  return c ? { icon: c.icon || '•', name: c.name } : { icon: '•', name: catId };
+  return c ? { icon: esc(c.icon || '•'), name: c.name } : { icon: '•', name: catId }; // icon is user text → pre-escaped (emoji unaffected)
 }
 // A category FILTER value is one of: null (all), '__uncat', a category id, a whole
 // group ('g:<gid>'), or a subcategory ('sub:<gid>|<name>'). These two helpers label
@@ -2016,7 +2047,7 @@ function openCatTreePicker(opts){
     // branch; the chevron on the right only expands/collapses.
     const branch = (lvl, pickVal, icon, name, togKey) => {
       const on = opts.current === pickVal, sOpen = open.has(togKey);
-      return '<div class="tree-row ' + lvl + '" data-pick="' + esc(pickVal) + '" style="cursor:pointer"><span class="ic">' + icon + '</span>' +
+      return '<div class="tree-row ' + lvl + '" data-pick="' + esc(pickVal) + '" style="cursor:pointer"><span class="ic">' + esc(icon) + '</span>' +
         '<div class="body"><div class="t1">' + esc(name) + '</div></div>' +
         (on ? '<span class="chev" style="color:var(--accent)">✓</span>' : '') +
         '<span class="chev tog" data-tog="' + esc(togKey) + '">' + (sOpen ? '▾' : '▸') + '</span></div>';
@@ -2327,7 +2358,7 @@ function importOneFile(a){
         '<select data-x="ntype" style="max-width:140px">' + ACCT_TYPES.map(([v, l]) => '<option value="' + v + '">' + l + '</option>').join('') + '</select>' +
         '<button class="btn btn-sm" data-x="nadd">Add</button></div></div>' +
         '<div style="margin-bottom:10px"><span class="chip' + (customOpen ? '' : ' on') + '" data-x="preset">' +
-        (a.preset ? esc(a.preset.label) + ' · tap to adjust' : 'Custom mapping') + '</span></div>';
+        (a.preset ? esc(a.preset.label) + (a.mapping && a.mapping.flipDemoted ? ' · amounts look already signed, so flip was turned off — check the preview' : '') + ' · tap to adjust' : 'Custom mapping') + '</span></div>';
       if (customOpen){
         html += '<div class="card" style="background:var(--card2)">' +
           '<div class="row" style="margin-bottom:8px">' +
@@ -2404,7 +2435,7 @@ function groupedCatHTML(spendMap, incomeMap, investMap, opts){
   // (data-btog). Pass gid=null for a synthetic roll-up with no popup — then the whole
   // row just toggles. The chevron carries .tog so it renders as a clear expand button.
   const grpRow = (gid, icon, name, amtStr, color, tog, open) =>
-    '<div class="tree-row grp" ' + (gid ? 'data-cmval="g:' + esc(gid) + '"' : 'data-btog="' + esc(tog) + '"') + ' data-btk="' + esc(tog) + '" style="cursor:pointer"><span class="ic">' + icon + '</span>' +
+    '<div class="tree-row grp" ' + (gid ? 'data-cmval="g:' + esc(gid) + '"' : 'data-btog="' + esc(tog) + '"') + ' data-btk="' + esc(tog) + '" style="cursor:pointer"><span class="ic">' + esc(icon) + '</span>' +
     '<div class="body"><div class="t1">' + esc(name) + '</div></div><span class="amt" style="color:' + color + '">' + amtStr + '</span>' +
     '<span class="chev tog" data-btog="' + esc(tog) + '">' + (open ? '▾' : '▸') + '</span></div>';
   const subRow = (gid, s, amtStr, open) =>
@@ -4089,7 +4120,7 @@ function renderRecurringScreen(c){
   // category (rename / mark seasonal / one-time); else a plain leaf.
   const trow = (icon, name, sub, amtStr, lvl, tog, open, catId) =>
     '<div class="tree-row ' + lvl + '"' + (tog ? ' data-rtog="' + esc(tog) + '" style="cursor:pointer"' : catId ? ' data-catedit="' + esc(catId) + '" style="cursor:pointer"' : ' style="cursor:default"') + '>' +
-    '<span class="ic">' + icon + '</span><div class="body"><div class="t1">' + esc(name) + '</div>' +
+    '<span class="ic">' + esc(icon) + '</span><div class="body"><div class="t1">' + esc(name) + '</div>' +
     (sub ? '<div class="t2">' + esc(sub) + '</div>' : '') + '</div>' +
     '<span class="amt">' + amtStr + '</span>' + (tog ? '<span class="chev tog">' + (open ? '▾' : '▸') + '</span>' : '<span class="chev" style="opacity:.5">' + (catId ? '✎' : '') + '</span>') + '</div>';
 
@@ -4154,7 +4185,7 @@ function renderRecurringScreen(c){
     if (!gcats.length) continue;
     const gTotal = gcats.reduce((s, cid) => s + catTotal(cid), 0);
     const gkey = 'g:' + g.id, gOpen = RECUR_OPEN.has(gkey);
-    html += '<div class="tree-row grp" data-rtog="' + esc(gkey) + '" style="cursor:pointer"><span class="ic">' + (g.icon || '📂') + '</span>' +
+    html += '<div class="tree-row grp" data-rtog="' + esc(gkey) + '" style="cursor:pointer"><span class="ic">' + esc(g.icon || '📂') + '</span>' +
       '<div class="body"><div class="t1">' + esc(g.name) + '</div></div><span class="amt">' + fmt$(gTotal) + '/mo</span><span class="chev tog">' + (gOpen ? '▾' : '▸') + '</span></div>';
     if (!gOpen) continue;
     const direct = gcats.filter((cid) => !DATA.cats[cid].sub);
@@ -4371,7 +4402,7 @@ function renderCatsScreen(c){
     const cats = liveCats().filter((cat) => cat.group === g.id);
     if (!cats.length && g.kind === 'system') continue;
     const gOpen = CATS_OPEN.has('g:' + g.id);
-    html += '<div class="tree-row grp" data-gtog="' + g.id + '"><span class="ic">' + (g.icon || '📂') + '</span>' +
+    html += '<div class="tree-row grp" data-gtog="' + g.id + '"><span class="ic">' + esc(g.icon || '📂') + '</span>' +
       '<div class="body"><div class="t1">' + esc(g.name) + '</div></div>' +
       (g.kind === 'system' ? '' : '<span class="tree-act" data-gadd="' + g.id + '">＋</span>') +
       '<span class="chev tog">' + (gOpen ? '▾' : '▸') + '</span></div>';
@@ -4675,6 +4706,8 @@ function renderSyncScreen(c){
       const p1 = q('[data-x=p1]').value, p2 = q('[data-x=p2]').value;
       const weak = passphraseWeakness(p1);
       if (weak){ toast(weak); return; }
+      const erased = localStorage.getItem(ERASEDKEY);
+      if (erased && (await sha256hex(p1)) === erased){ toast('That passphrase’s server copy was erased — choose a NEW passphrase.'); return; }
       if (p1 !== p2){ toast('Passphrases don’t match'); return; }
       // Same passphrase = same sync room: the two ledgers would merge into one blob.
       const other = localStorage.getItem(WS === 'personal' ? 'nest.pass' : 'nest.p.pass');
@@ -4688,7 +4721,7 @@ function renderSyncScreen(c){
       try {
         await enableSync(p1);
         toast('Sync enabled 🔒');
-      } catch (e) { toast('Could not reach sync server — will retry automatically'); }
+      } catch (e) { toast('Couldn’t reach the sync server — nothing was saved. Try again when online.'); }
       renderMore();
     };
   } else {
@@ -4704,10 +4737,13 @@ function renderSyncScreen(c){
       disableSync(); renderMore(); toast('Sync off');
     };
     q('[data-x=erase]').onclick = async () => {
-      if (!(await confirmDlg('Erase the encrypted copy and ALL backups from the server? Every synced device stops receiving updates and your other phone must re-enable sync. Local data on this device is untouched.', 'Erase'))) return;
+      if (!(await confirmDlg('Erase the encrypted copy and ALL backups from the server? Your other phone will be disconnected automatically and must re-enable Sync with a NEW passphrase. Local data on this device is untouched.', 'Erase'))) return;
+      const btn = q('[data-x=erase]'); btn.disabled = true; btn.textContent = 'Erasing…';
+      const h = await sha256hex(localStorage.getItem(PASSKEY) || '');
       const ok = await eraseServerCopy();
-      disableSync(); renderMore();
-      toast(ok ? 'Server copy erased' : 'Disconnected, but couldn’t reach the server to erase — try again when online');
+      if (!ok){ btn.disabled = false; btn.textContent = 'Disconnect & erase server copy'; toast('Couldn’t reach the server to erase — still connected. Try again when online.'); return; }
+      try { localStorage.setItem(ERASEDKEY, h); } catch (e) {} // this passphrase can never be re-used for a room
+      disableSync(); renderMore(); toast('Server copy erased — re-enable Sync with a new passphrase');
     };
   }
 }
