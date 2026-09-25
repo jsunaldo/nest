@@ -279,6 +279,27 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 .tree-l2{margin-left:14px; border-left:2px solid var(--line); padding-left:16px}
 .tree-l3{margin-left:22px; border-left:2px solid var(--line); padding-left:16px}
 .tree-row .amt{font-weight:700; font-variant-numeric:tabular-nums; white-space:nowrap}
+#print-root{display:none}
+@media print{
+  html.printing body > *:not(#print-root){display:none !important}
+  html.printing #print-root{display:block !important; color:#000; background:#fff; font:12px -apple-system,Helvetica,Arial,sans-serif}
+  html.printing, html.printing body{background:#fff !important; height:auto !important; overflow:visible !important}
+}
+#print-root h1{font-size:18px; margin:0 0 4px}
+#print-root .ps{font-size:11px; color:#555; margin:0 0 10px}
+#print-root table{width:100%; border-collapse:collapse}
+#print-root th,#print-root td{border:1px solid #999; padding:5px 7px; text-align:left; vertical-align:top}
+#print-root th{background:#eee; font-size:11px}
+#print-root td.c{text-align:center; font-size:15px; width:56px}
+#print-root td.r{text-align:right; white-space:nowrap}
+#print-root tr{page-break-inside:avoid}
+.gtab{width:100%; border-collapse:collapse; font-size:14px}
+.gtab th{font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--dim); text-align:left; padding:6px 6px; border-bottom:1px solid var(--line)}
+.gtab td{padding:9px 6px; border-bottom:1px solid var(--line); vertical-align:top}
+.gtab td.c{text-align:center; width:44px}
+.gtab td.r{text-align:right; white-space:nowrap}
+.gtab input[type=checkbox]{width:20px; height:20px; accent-color:var(--accent); cursor:pointer}
+.gtab tr.done td{color:var(--dim)}
 </style>
 </head>
 <body>
@@ -321,7 +342,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v8.3'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v8.4'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 // ---- Workspaces: 'main' = the shared household ledger (legacy keys, syncs with the
 // shared passphrase) and 'personal' = a fully separate ledger with its OWN storage and
@@ -2847,7 +2868,8 @@ function renderGiftList(c, close){
     '<div class="bl-tile"><div class="bl-v">' + thankedPeople + '<span style="color:var(--dim)">/' + groups.length + '</span></div><div class="bl-l">Thanked</div></div></div>';
   html += '<div class="row" style="margin:2px 0 12px">' +
     '<button class="btn grow" data-x="import">📋 Paste from Excel</button>' +
-    '<button class="btn btn-primary grow" data-x="add">＋ Add gift</button></div>';
+    '<button class="btn btn-primary grow" data-x="add">＋ Add gift</button></div>' +
+    (groups.length ? '<button class="btn btn-block" data-x="table" style="margin:-4px 0 12px">✉️ Envelope checklist · print table</button>' : '');
   html += groups.length
     ? '<div class="card" style="padding:2px 12px">' + groups.map(giftGroupHTML).join('') + '</div>' +
       '<p class="tiny" style="margin:8px 0 16px">' + items.length + ' gifts from ' + groups.length + ' people' +
@@ -2861,6 +2883,7 @@ function renderGiftList(c, close){
   q('[data-x=close]').onclick = () => close && close();
   q('[data-x=add]').onclick = () => openGiftEditor(null, rerender);
   q('[data-x=import]').onclick = () => openGiftImport(rerender);
+  { const tb = q('[data-x=table]'); if (tb) tb.onclick = () => openGiftTable(rerender); }
   { const ca = q('[data-x=clearall]'); if (ca) ca.onclick = async () => {
     if (await confirmDlg('Delete all ' + giftItems().length + ' gifts from the registry? This can’t be undone.', 'Clear all')){ saveGiftItems([]); rerender(); }
   }; }
@@ -2879,6 +2902,60 @@ function renderGiftList(c, close){
     saveGiftItems(items2); rerender();
   }; });
   c.querySelectorAll('[data-giftedit]').forEach((n) => { n.onclick = () => openGiftEditor(n.dataset.giftedit, rerender); });
+}
+// Envelope checklist: one row per PERSON (multi-gift givers collapse to one row, since
+// it's one envelope/card per person). The flag lives on each of that person's gifts.
+const giftEnvDone = (grp) => grp.gifts.every((g) => g.envelope);
+const giftDesc = (grp) => grp.gifts.map((g) => (g.pending ? 'TBD' : (g.note || (g.amt != null ? 'Cash' : 'Gift')))).join(', ');
+function openGiftTable(after){
+  const m = modal('', '<div data-x="tb"></div>', () => { if (after) after(); });
+  const body = m.node.querySelector('[data-x=tb]');
+  let sortBy = 'name';
+  const draw = () => {
+    const groups = groupGifts(giftItems());
+    if (sortBy === 'name') groups.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    const have = groups.filter(giftEnvDone).length;
+    body.innerHTML =
+      '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px">' +
+        '<b style="font-size:17px">✉️ Envelope checklist</b><button class="btn btn-sm" data-x="close">✕ Close</button></div>' +
+      '<p class="muted" style="margin:0 0 10px"><b style="color:var(--text)">' + have + '</b> of ' + groups.length + ' envelopes in hand · ' +
+        '<a data-x="sort" style="cursor:pointer;color:var(--accent)">sort by ' + (sortBy === 'name' ? 'amount' : 'name') + '</a></p>' +
+      '<button class="btn btn-primary btn-block" data-x="print" style="margin-bottom:12px">🖨 Print table</button>' +
+      '<table class="gtab"><thead><tr><th>✉️</th><th>Name</th><th>Gift</th><th style="text-align:right">Amount</th><th>Thx</th></tr></thead><tbody>' +
+      groups.map((grp) => {
+        const done = giftEnvDone(grp);
+        return '<tr' + (done ? ' class="done"' : '') + '><td class="c"><input type="checkbox" data-env="' + esc(giftKey(grp.name)) + '"' + (done ? ' checked' : '') + ' aria-label="Envelope for ' + esc(grp.name || '') + '"></td>' +
+          '<td>' + esc(grp.name || '—') + '</td><td>' + esc(giftDesc(grp)) + '</td>' +
+          '<td class="r">' + (grp.total ? fmt$(grp.total) : (grp.anyPending ? 'TBD' : '')) + '</td>' +
+          '<td class="c">' + giftStatusIcon(grp.anyPending, grp.allThanked) + '</td></tr>';
+      }).join('') + '</tbody></table>';
+    body.querySelector('[data-x=close]').onclick = () => m.close();
+    body.querySelector('[data-x=sort]').onclick = () => { sortBy = sortBy === 'name' ? 'amount' : 'name'; draw(); };
+    body.querySelector('[data-x=print]').onclick = () => printGiftTable(sortBy);
+    body.querySelectorAll('[data-env]').forEach((cb) => { cb.onchange = () => {
+      const items = giftItems().slice();
+      for (const g of items) if (giftKey(g.name) === cb.dataset.env) g.envelope = cb.checked;
+      saveGiftItems(items); draw();
+    }; });
+  };
+  draw();
+}
+function printGiftTable(sortBy){
+  const groups = groupGifts(giftItems());
+  if (sortBy === 'name') groups.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  const total = groups.reduce((s, g) => s + g.total, 0), have = groups.filter(giftEnvDone).length;
+  let root = document.getElementById('print-root');
+  if (!root){ root = document.createElement('div'); root.id = 'print-root'; document.body.appendChild(root); }
+  root.innerHTML = '<h1>Wedding Gift List — Envelope Checklist</h1>' +
+    '<p class="ps">' + groups.length + ' people · ' + fmt$(total) + ' received · ' + have + ' envelopes in hand · printed ' + new Date().toLocaleDateString() + '</p>' +
+    '<table><thead><tr><th>Envelope</th><th>#</th><th>Name</th><th>Gift</th><th style="text-align:right">Amount</th><th>Thanked</th></tr></thead><tbody>' +
+    groups.map((grp, i) => '<tr><td class="c">' + (giftEnvDone(grp) ? '☑' : '☐') + '</td><td class="r">' + (i + 1) + '</td><td>' + esc(grp.name || '—') + '</td><td>' + esc(giftDesc(grp)) + '</td>' +
+      '<td class="r">' + (grp.total ? fmt$(grp.total) : (grp.anyPending ? 'TBD' : '')) + '</td><td class="c">' + (grp.anyPending ? '' : (grp.allThanked ? '☑' : '☐')) + '</td></tr>').join('') +
+    '</tbody></table>';
+  document.documentElement.classList.add('printing');
+  const done = () => { document.documentElement.classList.remove('printing'); window.removeEventListener('afterprint', done); };
+  window.addEventListener('afterprint', done);
+  setTimeout(() => { window.print(); setTimeout(done, 1500); }, 50);
 }
 function openGiftEditor(id, after){
   const existing = id ? giftItems().find((x) => x.id === id) : null;
@@ -2923,9 +3000,9 @@ function openGiftImport(after){
   const commit = (replace) => {
     const parsed = parseGiftPaste(ta.value);
     if (!parsed.length){ toast('Nothing recognized to import'); return; }
-    const prevThx = {}; if (replace) for (const g of giftItems()) if (g.thanked) prevThx[(g.name || '').toLowerCase()] = true;
+    const prevThx = {}, prevEnv = {}; if (replace) for (const g of giftItems()){ if (g.thanked) prevThx[(g.name || '').toLowerCase()] = true; if (g.envelope) prevEnv[giftKey(g.name)] = true; }
     const items = replace ? [] : giftItems().slice();
-    for (const p of parsed) items.push({ id: 'gift_' + uid(), name: p.name, amt: p.amt, note: p.note, pending: p.pending, thanked: replace ? !!prevThx[(p.name || '').toLowerCase()] : false });
+    for (const p of parsed) items.push({ id: 'gift_' + uid(), name: p.name, amt: p.amt, note: p.note, pending: p.pending, thanked: replace ? !!prevThx[(p.name || '').toLowerCase()] : false, envelope: replace ? !!prevEnv[giftKey(p.name)] : false });
     saveGiftItems(items); m.close(); if (after) after();
     toast('Imported ' + parsed.length + ' gift' + (parsed.length === 1 ? '' : 's'));
   };
