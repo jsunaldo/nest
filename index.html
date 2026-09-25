@@ -285,12 +285,11 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
   html.printing #print-root{display:block !important; color:#000; background:#fff; font:12px -apple-system,Helvetica,Arial,sans-serif}
   html.printing, html.printing body{background:#fff !important; height:auto !important; overflow:visible !important}
 }
-#print-root h1{font-size:18px; margin:0 0 4px}
-#print-root .ps{font-size:11px; color:#555; margin:0 0 10px}
+#print-root h1{font-size:14px; margin:0 0 8px; font-weight:600}
 #print-root table{width:100%; border-collapse:collapse}
-#print-root th,#print-root td{border:1px solid #999; padding:5px 7px; text-align:left; vertical-align:top}
-#print-root th{background:#eee; font-size:11px}
-#print-root td.c{text-align:center; font-size:15px; width:56px}
+#print-root th,#print-root td{border:0; padding:3px 8px 3px 0; text-align:left; vertical-align:top; color:#000}
+#print-root th{background:none; font-size:11px; font-weight:600}
+#print-root td.c{text-align:center; width:36px}
 #print-root td.r{text-align:right; white-space:nowrap}
 #print-root tr{page-break-inside:avoid}
 .gtab{width:100%; border-collapse:collapse; font-size:14px}
@@ -342,7 +341,7 @@ input.budget-in{max-width:110px; text-align:right; padding:7px 10px}
 
 /* ============================ CONSTANTS ============================ */
 const SYNC_URL = 'https://nest-sync.jsunaldo.workers.dev';
-const BUILD = 'v8.4'; // bump on every deploy — shown in More footer so updates are verifiable
+const BUILD = 'v8.5'; // bump on every deploy — shown in More footer so updates are verifiable
 const SYNC_MAPS = ['accounts', 'txns', 'rules', 'budgets', 'cats', 'kv'];
 // ---- Workspaces: 'main' = the shared household ledger (legacy keys, syncs with the
 // shared passphrase) and 'personal' = a fully separate ledger with its OWN storage and
@@ -2943,14 +2942,12 @@ function openGiftTable(after){
 function printGiftTable(sortBy){
   const groups = groupGifts(giftItems());
   if (sortBy === 'name') groups.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-  const total = groups.reduce((s, g) => s + g.total, 0), have = groups.filter(giftEnvDone).length;
   let root = document.getElementById('print-root');
   if (!root){ root = document.createElement('div'); root.id = 'print-root'; document.body.appendChild(root); }
-  root.innerHTML = '<h1>Wedding Gift List — Envelope Checklist</h1>' +
-    '<p class="ps">' + groups.length + ' people · ' + fmt$(total) + ' received · ' + have + ' envelopes in hand · printed ' + new Date().toLocaleDateString() + '</p>' +
-    '<table><thead><tr><th>Envelope</th><th>#</th><th>Name</th><th>Gift</th><th style="text-align:right">Amount</th><th>Thanked</th></tr></thead><tbody>' +
-    groups.map((grp, i) => '<tr><td class="c">' + (giftEnvDone(grp) ? '☑' : '☐') + '</td><td class="r">' + (i + 1) + '</td><td>' + esc(grp.name || '—') + '</td><td>' + esc(giftDesc(grp)) + '</td>' +
-      '<td class="r">' + (grp.total ? fmt$(grp.total) : (grp.anyPending ? 'TBD' : '')) + '</td><td class="c">' + (grp.anyPending ? '' : (grp.allThanked ? '☑' : '☐')) + '</td></tr>').join('') +
+  root.innerHTML = '<h1>Wedding Gifts</h1>' +
+    '<table><thead><tr><th>Env.</th><th>Name</th><th>Gift</th><th style="text-align:right">Amount</th></tr></thead><tbody>' +
+    groups.map((grp) => '<tr><td class="c">' + (giftEnvDone(grp) ? '☑' : '☐') + '</td><td>' + esc(grp.name || '—') + '</td><td>' + esc(giftDesc(grp)) + '</td>' +
+      '<td class="r">' + (grp.total ? fmt$(grp.total) : (grp.anyPending ? 'TBD' : '')) + '</td></tr>').join('') +
     '</tbody></table>';
   document.documentElement.classList.add('printing');
   const done = () => { document.documentElement.classList.remove('printing'); window.removeEventListener('afterprint', done); };
